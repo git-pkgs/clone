@@ -14,9 +14,9 @@ func RemoteBranches(ctx context.Context, retry Retry, url string) ([]string, err
 		return nil, err
 	}
 	out, err := retry.Do(ctx, Command{
-		Label: gitLSRemote,
+		Args:  []string{"-c", "credential.helper=", "ls-remote", "--heads", "--", url}, //nolint:goconst // Git argv is clearer with literal subcommands.
+		Label: "ls-remote",                                                             //nolint:goconst // Retry notices use the literal Git subcommand.
 		Env:   []string{"GIT_TERMINAL_PROMPT=0"},
-		Args:  []string{"-c", "credential.helper=", gitLSRemote, "--heads", "--", url},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", strings.TrimSpace(out), err)
@@ -30,16 +30,16 @@ func RemoteHead(ctx context.Context, retry Retry, url string) (string, error) {
 		return "", err
 	}
 	out, err := retry.Do(ctx, Command{
-		Label: gitLSRemote,
+		Args:  []string{"ls-remote", "--", url, "HEAD"}, //nolint:goconst // Git argv is clearer with literal subcommands and refs.
+		Label: "ls-remote",                              //nolint:goconst // Retry notices use the literal Git subcommand.
 		Env:   []string{"GIT_TERMINAL_PROMPT=0"},
-		Args:  []string{gitLSRemote, "--", url, gitHEAD},
 	})
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", strings.TrimSpace(out), err)
 	}
 	for line := range strings.SplitSeq(out, "\n") {
 		sha, ref, ok := strings.Cut(line, "\t")
-		if ok && strings.TrimSpace(ref) == gitHEAD {
+		if ok && strings.TrimSpace(ref) == "HEAD" {
 			return strings.TrimSpace(sha), nil
 		}
 	}

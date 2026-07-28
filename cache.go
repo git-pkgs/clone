@@ -81,9 +81,9 @@ func (c *Cache) EnsureCommit(ctx context.Context, url, commit string) error {
 		return nil
 	}
 	out, err := policy.Do(ctx, Command{
-		Label: gitFetch,
+		Args:  []string{"fetch", "--unshallow", "--quiet", "origin"}, //nolint:goconst // Git argv is clearer with literal subcommands and flags.
+		Label: "fetch",                                               //nolint:goconst // Retry notices use the literal Git subcommand.
 		Dir:   cacheSrc,
-		Args:  []string{gitFetch, "--unshallow", quietFlag, "origin"},
 	})
 	if err != nil {
 		return fmt.Errorf("unshallow %s: %s: %w", url, strings.TrimSpace(out), err)

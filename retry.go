@@ -126,8 +126,16 @@ func (r Retry) Do(ctx context.Context, cmd Command) (string, error) {
 	}
 }
 
-// DestReset returns a cleanup function for a failed clone attempt, or nil
-// when dst already contains caller-owned files.
+// DestReset returns the cleanup to run after a failed clone attempt, or nil
+// when there is nothing safe to clean. A clone that dies partway can leave
+// the destination behind, and `git clone` refuses a non-empty target, so the
+// cleanup is needed both before retries and before a terminal error return.
+//
+// Removal is offered only when dst is absent or empty at this point. Callers
+// reach the clone path exactly when dst holds no .git, so an absent or empty
+// dst can only ever gain content this call put there. A non-empty one belongs
+// to the caller, and Git would reject it as a permanent error that is never
+// retried anyway.
 func DestReset(dst string) func() error {
 	entries, err := os.ReadDir(dst)
 	if err != nil && !os.IsNotExist(err) {
@@ -139,7 +147,18 @@ func DestReset(dst string) func() error {
 	return func() error { return os.RemoveAll(dst) }
 }
 
+// permanentFailures are answers about the repository, the ref, the local
+// destination, or the local machine. Repeating the command cannot change any
+// of them, and retrying would only multiply pointless remote traffic.
+//
+// Several of these matter precisely because Git reports them alongside
+// transport noise. A clone that runs the disk out of space ends with "fatal:
+// write error: No space left on device" followed by "fatal: the remote end
+// hung up unexpectedly", and a rejected credential can surface as "error: RPC
+// failed; result=22, HTTP code = 401", both of which would otherwise be read
+// as transient. Permanent markers are therefore checked first and win.
 var permanentFailures = []string{
+	// The repository, the ref, or the credentials.
 	"repository not found",
 	"authentication failed",
 	"could not read username",
@@ -160,7 +179,10 @@ var permanentFailures = []string{
 	"http code = 403",
 	"http code = 404",
 	"http code = 413",
+	// A server-side hard limit, not a hiccup.
 	"pack exceeds maximum allowed size",
+	// The local destination and the local machine. These arrive wrapped in
+	// transport noise but no amount of retrying frees a disk or a thread.
 	"already exists and is not an empty directory",
 	"no space left on device",
 	"disk quota exceeded",
@@ -172,6 +194,9 @@ var permanentFailures = []string{
 	"unable to fork",
 }
 
+// transientFailures are name-resolution, connection, TLS, and
+// remote-availability failures. They say nothing about the repository or the
+// ref, so the same command may well succeed a moment later.
 var transientFailures = []string{
 	"could not resolve host",
 	"couldn't resolve host",
@@ -204,6 +229,8 @@ var transientFailures = []string{
 	"returned error: 502",
 	"returned error: 503",
 	"returned error: 504",
+	// Cloudflare's origin-side range: 520 unknown, 521 down, 522/524 timeout,
+	// 523 unreachable. All say the edge could not reach the origin right now.
 	"returned error: 520",
 	"returned error: 521",
 	"returned error: 522",
@@ -221,13 +248,21 @@ var transientFailures = []string{
 	"internal server error",
 	"bad gateway",
 	"service unavailable",
+	// Narrowed from "temporarily unavailable": nginx reports 503 as "Service
+	// Temporarily Unavailable", but a bare "Resource temporarily unavailable"
+	// is a local EAGAIN (see "unable to create thread" above) and must stay
+	// permanent.
 	"service temporarily unavailable",
 	"too many requests",
 }
 
 // TransientFailure reports whether Git's combined output describes a failure
-// worth another attempt. Permanent markers take precedence, and unrecognized
-// output is treated as permanent.
+// worth another attempt.
+//
+// The classification fails closed. A permanent marker wins over a transient
+// one, and output matching nothing at all is treated as permanent, so an
+// unfamiliar message keeps today's single-attempt behavior rather than
+// turning into repeated remote traffic.
 func TransientFailure(out string) bool {
 	lower := strings.ToLower(out)
 	for _, marker := range permanentFailures {

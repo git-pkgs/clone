@@ -1,10 +1,6 @@
 # clone
 
-Go library for programs that keep local checkouts of remote Git repositories. It clones or fetches HTTPS repositories, retries recognized network failures, maintains a persistent shallow cache, and reads files from commits without loading an entire blob into memory.
-
-The package shells out to the `git` binary and requires Git on `PATH`. It has no third-party Go dependencies and supports Go 1.25 or later.
-
-`clone` focuses on command-level checkout operations. Applications that need to parse Git objects or walk history in process can use a library such as [go-git](https://github.com/go-git/go-git).
+Go library for programs that keep local checkouts of HTTPS Git repositories. It shells out to the `git` binary, which must be on `PATH`, and has no third-party Go dependencies. The package supports Go 1.25 or later. For in-process object parsing or history walking, use a library such as [go-git](https://github.com/go-git/go-git).
 
 ## Install
 
@@ -14,7 +10,7 @@ go get github.com/git-pkgs/clone
 
 ## Clone or update a checkout
 
-`Ensure` creates a shallow clone on its first call. Later calls fetch the requested ref and reset the existing checkout. The ref can be a branch, tag, commit ID, or an empty string for the remote's default branch.
+`Ensure` creates a shallow clone on its first call, then fetches and resets the existing checkout on later calls. The ref can be a branch, tag, commit ID, or an empty string for the remote's default branch.
 
 ```go
 ctx := context.Background()
@@ -28,13 +24,11 @@ if err := clone.Ensure(ctx, clone.Retry{}, url, dst, "main", false); err != nil 
 fmt.Println(clone.Head(ctx, dst))
 ```
 
-Pass `true` as the final argument for a full clone. Calling `Ensure` with `true` also unshallows a checkout created by an earlier call.
-
-Clone and fetch errors are returned as `*clone.UnreachableError`, except when the context was canceled or reached its deadline. `errors.As` can retrieve the URL and underlying Git error.
+Pass `true` as the final argument for a full clone, including when an existing shallow checkout needs to be unshallowed. Clone and fetch errors are returned as `*clone.UnreachableError`, except when the context was canceled or reached its deadline. `errors.As` retrieves the URL and underlying Git error. `ValidateURL` accepts `https://` URLs, while `ValidateRef` rejects leading hyphens, `..`, and characters outside letters, digits, `.`, `_`, `/`, and `-`.
 
 ## Persistent cache
 
-`Cache` stores one checkout per URL under `Root`. `Prepare` updates the shared shallow checkout while holding a per-URL lock, replaces `dst` with a copy, and returns the commit copied into the destination. The destination must be outside `Root`.
+`Cache` stores one checkout per URL under `Root`. `Prepare` holds a per-URL lock while updating the shallow checkout, then replaces `dst` with a copy and returns its commit. The destination must be outside `Root`.
 
 ```go
 cache := clone.Cache{
@@ -53,7 +47,7 @@ if err != nil {
 fmt.Println(commit, cache.DiskBytes("https://github.com/git-pkgs/clone"))
 ```
 
-`EnsureCommit` unshallows the cached checkout when a historical commit is missing. This lets callers keep the usual update path shallow and pay for full history only when they need it.
+When a historical commit is missing from the shallow cache, `EnsureCommit` unshallows the checkout:
 
 ```go
 if err := cache.EnsureCommit(ctx, url, commit); err != nil {
@@ -63,9 +57,7 @@ if err := cache.EnsureCommit(ctx, url, commit); err != nil {
 
 ## Read a file from a commit
 
-`Blob` runs `git show <commit>:<path>`, reads at most `maxBytes+1`, and drains the remaining output so Git can exit. The extra byte distinguishes content exactly at the limit from truncated content. A NUL byte within the returned range marks the blob as binary.
-
-Validate untrusted commit IDs and paths before passing them to `Blob`:
+`Blob` runs `git show <commit>:<path>` and reads at most `maxBytes+1`, draining the rest of stdout so Git can exit. The extra byte distinguishes content exactly at the limit from truncated content, and a NUL byte within the returned range marks the blob as binary. Check untrusted input with `ValidCommit` and `SanitizePath` before calling it:
 
 ```go
 path, ok := clone.SanitizePath("cmd/tool/main.go")
@@ -89,20 +81,25 @@ if !binary {
 fmt.Println("truncated:", truncated)
 ```
 
-`ValidateURL` accepts `https://` URLs. `ValidateRef` accepts an empty ref or names made from letters, digits, `.`, `_`, `/`, and `-`, while rejecting leading hyphens and `..`.
-
 ## Remote queries
 
-`RemoteBranches` returns sorted branch names from `git ls-remote --heads`. It disables terminal prompts and the ambient credential helper so URLs from untrusted input cannot trigger credential lookup. `RemoteHead` returns the SHA advertised for `HEAD` and keeps ambient non-interactive credentials available.
+`RemoteBranches` returns sorted branch names from `git ls-remote --heads`. It disables terminal prompts and the ambient credential helper so a supplied URL cannot trigger credential lookup. `RemoteHead` returns the SHA advertised for `HEAD` and keeps ambient non-interactive credentials available.
 
 ```go
 branches, err := clone.RemoteBranches(ctx, clone.Retry{}, url)
+if err != nil {
+    log.Fatal(err)
+}
+
 head, err := clone.RemoteHead(ctx, clone.Retry{}, url)
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ## Retry policy
 
-The zero value of `Retry` makes three attempts with exponential backoff and positive jitter. `Do` retries output recognized as a transient network or remote-service failure. Permanent markers take precedence, and unknown output is treated as permanent.
+The zero value of `Retry` allows three attempts with exponential backoff and positive jitter. `Do` retries only recognized network and remote-service failures. Permanent markers win when output contains both kinds, and an unknown message stops after the first attempt.
 
 ```go
 retry := clone.Retry{

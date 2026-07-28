@@ -7,14 +7,7 @@ import (
 	"time"
 )
 
-const (
-	DefaultWaitDelay = 10 * time.Second
-	gitClone         = "clone"
-	gitFetch         = "fetch"
-	gitLSRemote      = "ls-remote"
-	gitHEAD          = "HEAD"
-	quietFlag        = "--quiet"
-)
+const DefaultWaitDelay = 10 * time.Second
 
 // Runner runs one Git invocation and returns its combined output.
 type Runner func(ctx context.Context, dir string, env []string, args ...string) (string, error)

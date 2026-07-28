@@ -54,13 +54,13 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, full bool) e
 		return err
 	}
 
-	args := []string{gitClone, quietFlag}
+	args := []string{"clone", "--quiet"} //nolint:goconst // Git argv is clearer with literal subcommands and flags.
 	if !full {
 		args = append(args, "--depth", "1")
 	}
 	args = append(args, "--", url, dst)
 	out, err := retry.Do(ctx, Command{
-		Label: gitClone,
+		Label: "clone",
 		Env:   []string{"GIT_PROTOCOL_FROM_USER=0"},
 		Args:  args,
 		Reset: DestReset(dst),
@@ -78,9 +78,9 @@ func fetchRef(ctx context.Context, retry Retry, dst, ref string, full bool) erro
 	policy := retry.Resolved()
 	target := ref
 	if target == "" {
-		target = gitHEAD
+		target = "HEAD" //nolint:goconst // Git's default ref is clearest by its literal name.
 	}
-	args := []string{"-C", dst, gitFetch, quietFlag}
+	args := []string{"-C", dst, "fetch", "--quiet"} //nolint:goconst // Git argv is clearer with literal subcommands and flags.
 	if full {
 		out, _ := policy.Run(ctx, "", nil, "-C", dst, "rev-parse", "--is-shallow-repository")
 		if strings.TrimSpace(out) == "true" {
@@ -88,7 +88,10 @@ func fetchRef(ctx context.Context, retry Retry, dst, ref string, full bool) erro
 		}
 	}
 	args = append(args, "--", "origin", target)
-	out, err := policy.Do(ctx, Command{Label: gitFetch, Args: args})
+	out, err := policy.Do(ctx, Command{
+		Label: "fetch", //nolint:goconst // Retry notices use the literal Git subcommand.
+		Args:  args,
+	})
 	if err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(out), err)
 	}
@@ -102,7 +105,7 @@ func fetchRef(ctx context.Context, retry Retry, dst, ref string, full bool) erro
 // Head returns the object ID at HEAD in dir, or an empty string when dir is
 // not a Git repository.
 func Head(ctx context.Context, dir string) string {
-	out, err := Run(ctx, dir, nil, "rev-parse", gitHEAD)
+	out, err := Run(ctx, dir, nil, "rev-parse", "HEAD") //nolint:goconst // Git argv is clearer with literal refs.
 	if err != nil {
 		return ""
 	}
