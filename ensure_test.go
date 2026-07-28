@@ -1,0 +1,234 @@
+package clone
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+)
+
+type originFixture struct {
+	dir        string
+	url        string
+	firstSHA   string
+	mainSHA    string
+	featureSHA string
+}
+
+func newOriginFixture(t *testing.T) originFixture {
+	t.Helper()
+	requireGit(t)
+
+	dir := t.TempDir()
+	runGitTest(t, dir, "init", "--quiet", "-b", "main")
+	runGitTest(t, dir, "config", "uploadpack.allowAnySHA1InWant", "true")
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, dir, "add", "file.txt")
+	runGitTest(t, dir, "commit", "--quiet", "-m", "first")
+	firstSHA := runGitTest(t, dir, "rev-parse", "HEAD")
+
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, dir, "commit", "--quiet", "-am", "main")
+	mainSHA := runGitTest(t, dir, "rev-parse", "HEAD")
+	runGitTest(t, dir, "tag", "v1", firstSHA)
+
+	runGitTest(t, dir, "checkout", "--quiet", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, dir, "commit", "--quiet", "-am", "feature")
+	featureSHA := runGitTest(t, dir, "rev-parse", "HEAD")
+	runGitTest(t, dir, "checkout", "--quiet", "main")
+
+	url := "https://clone.test/repository"
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "url.file://"+dir+".insteadOf")
+	t.Setenv("GIT_CONFIG_VALUE_0", url)
+	t.Setenv("GIT_CONFIG_KEY_1", "protocol.file.allow")
+	t.Setenv("GIT_CONFIG_VALUE_1", "always")
+
+	return originFixture{
+		dir:        dir,
+		url:        url,
+		firstSHA:   firstSHA,
+		mainSHA:    mainSHA,
+		featureSHA: featureSHA,
+	}
+}
+
+func TestEnsureClonesFetchesRefsAndUnshallows(t *testing.T) {
+	origin := newOriginFixture(t)
+	dst := filepath.Join(t.TempDir(), "nested", "checkout")
+	ctx := context.Background()
+
+	if err := Ensure(ctx, Retry{}, origin.url, dst, "", false); err != nil {
+		t.Fatalf("initial Ensure: %v", err)
+	}
+	if got := Head(ctx, dst); got != origin.mainSHA {
+		t.Fatalf("initial HEAD = %q, want %q", got, origin.mainSHA)
+	}
+	if got := runGitTest(t, dst, "rev-parse", "--is-shallow-repository"); got != "true" {
+		t.Fatalf("initial checkout shallow = %q, want true", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(origin.dir, "file.txt"), []byte("new main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, origin.dir, "commit", "--quiet", "-am", "new main")
+	newMainSHA := runGitTest(t, origin.dir, "rev-parse", "HEAD")
+	if err := Ensure(ctx, Retry{}, origin.url, dst, "", false); err != nil {
+		t.Fatalf("update default branch: %v", err)
+	}
+	if got := Head(ctx, dst); got != newMainSHA {
+		t.Errorf("updated HEAD = %q, want %q", got, newMainSHA)
+	}
+
+	cases := []struct {
+		ref  string
+		want string
+	}{
+		{"feature", origin.featureSHA},
+		{"v1", origin.firstSHA},
+		{origin.firstSHA, origin.firstSHA},
+	}
+	for _, test := range cases {
+		if err := Ensure(ctx, Retry{}, origin.url, dst, test.ref, false); err != nil {
+			t.Fatalf("Ensure ref %q: %v", test.ref, err)
+		}
+		if got := Head(ctx, dst); got != test.want {
+			t.Errorf("HEAD after ref %q = %q, want %q", test.ref, got, test.want)
+		}
+	}
+
+	if err := Ensure(ctx, Retry{}, origin.url, dst, "", true); err != nil {
+		t.Fatalf("unshallow: %v", err)
+	}
+	if got := Head(ctx, dst); got != newMainSHA {
+		t.Errorf("HEAD after unshallow = %q, want %q", got, newMainSHA)
+	}
+	if got := runGitTest(t, dst, "rev-parse", "--is-shallow-repository"); got != "false" {
+		t.Errorf("checkout shallow after full Ensure = %q, want false", got)
+	}
+}
+
+func TestEnsureRejectsInputBeforeRunningGit(t *testing.T) {
+	for _, test := range []struct {
+		url string
+		ref string
+	}{
+		{"ssh://example.com/repo", "main"},
+		{"https://example.com/repo", "--all"},
+	} {
+		calls := 0
+		retry := Retry{
+			Run: func(context.Context, string, []string, ...string) (string, error) {
+				calls++
+				return "", nil
+			},
+		}
+		err := Ensure(context.Background(), retry, test.url, t.TempDir(), test.ref, false)
+		if err == nil {
+			t.Fatalf("Ensure(%q, %q) succeeded", test.url, test.ref)
+		}
+		var unreachable *UnreachableError
+		if !errors.As(err, &unreachable) {
+			t.Fatalf("error %T = %v, want *UnreachableError", err, err)
+		}
+		if calls != 0 {
+			t.Errorf("Git calls = %d, want 0", calls)
+		}
+	}
+}
+
+func TestEnsureReturnsContextErrorDirectly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	retry := Retry{
+		Run: func(context.Context, string, []string, ...string) (string, error) {
+			cancel()
+			return "fatal: the remote end hung up unexpectedly", errGitExit
+		},
+	}
+	err := Ensure(ctx, retry, "https://example.invalid/repo", filepath.Join(t.TempDir(), "dst"), "", false)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	var unreachable *UnreachableError
+	if errors.As(err, &unreachable) {
+		t.Fatalf("cancellation wrapped as UnreachableError: %v", err)
+	}
+}
+
+func TestEnsureRetriesCloneAndResetsPartialDestination(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "checkout")
+	calls := 0
+	var envs [][]string
+	var argSets [][]string
+	retry := Retry{
+		Run: func(_ context.Context, _ string, env []string, args ...string) (string, error) {
+			calls++
+			envs = append(envs, append([]string(nil), env...))
+			argSets = append(argSets, append([]string(nil), args...))
+			if calls == 1 {
+				if err := os.MkdirAll(dst, dirPerm); err != nil {
+					return "", err
+				}
+				if err := os.WriteFile(filepath.Join(dst, "partial"), []byte("partial"), 0o644); err != nil {
+					return "", err
+				}
+				return "fatal: Connection reset by peer", errGitExit
+			}
+			return "", nil
+		},
+		Sleep: func(context.Context, time.Duration) error { return nil },
+	}
+	if err := Ensure(context.Background(), retry, "https://example.invalid/repo", dst, "", false); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("clone calls = %d, want 2", calls)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "partial")); !os.IsNotExist(err) {
+		t.Errorf("partial clone remains: %v", err)
+	}
+	for i, env := range envs {
+		if !slices.Contains(env, "GIT_PROTOCOL_FROM_USER=0") {
+			t.Errorf("attempt %d env = %v", i+1, env)
+		}
+	}
+	for i, args := range argSets {
+		wantSuffix := []string{"--", "https://example.invalid/repo", dst}
+		if len(args) < len(wantSuffix) || !slices.Equal(args[len(args)-len(wantSuffix):], wantSuffix) {
+			t.Errorf("attempt %d args = %v", i+1, args)
+		}
+	}
+}
+
+func TestEnsureUnknownRefReturnsUnreachableError(t *testing.T) {
+	origin := newOriginFixture(t)
+	dst := filepath.Join(t.TempDir(), "checkout")
+	err := Ensure(context.Background(), Retry{}, origin.url, dst, "missing", false)
+	if err == nil {
+		t.Fatal("Ensure succeeded for missing ref")
+	}
+	var unreachable *UnreachableError
+	if !errors.As(err, &unreachable) {
+		t.Fatalf("error %T = %v, want *UnreachableError", err, err)
+	}
+	if unreachable.URL != origin.url || !strings.Contains(err.Error(), "remote ref") {
+		t.Errorf("error = %v", err)
+	}
+}
+
+func TestHeadReturnsEmptyOutsideRepository(t *testing.T) {
+	if got := Head(context.Background(), t.TempDir()); got != "" {
+		t.Errorf("Head = %q, want empty", got)
+	}
+}
