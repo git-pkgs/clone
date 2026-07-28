@@ -81,8 +81,8 @@ func (c *Cache) EnsureCommit(ctx context.Context, url, commit string) error {
 		return nil
 	}
 	out, err := policy.Do(ctx, Command{
-		Args:  []string{"-c", "credential.helper=", "fetch", "--unshallow", "--quiet", "origin"}, //nolint:goconst // Git argv is clearer with literal subcommands and flags.
-		Label: "fetch",                                                                           //nolint:goconst // Retry notices use the literal Git subcommand.
+		Args:  []string{"fetch", "--unshallow", "--quiet", "origin"}, //nolint:goconst // Git argv is clearer with literal subcommands and flags.
+		Label: "fetch",                                               //nolint:goconst // Retry notices use the literal Git subcommand.
 		Dir:   cacheSrc,
 		Env:   remoteEnv(),
 	})

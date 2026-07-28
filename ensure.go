@@ -54,7 +54,12 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, full bool) e
 		return err
 	}
 
-	args := []string{"-c", "credential.helper=", "clone", "--quiet"} //nolint:goconst // Git argv is clearer with literal subcommands and flags.
+	// The credential helper is intentionally NOT disabled here (unlike
+	// RemoteBranches/RemoteHead): a caller that reaches Ensure has already
+	// decided to clone this URL, and disabling the helper would make private
+	// repositories unreachable for callers that authenticate via stored git
+	// credentials rather than embedding a token in the URL.
+	args := []string{"clone", "--quiet"} //nolint:goconst // Git argv is clearer with literal subcommands and flags.
 	if !full {
 		args = append(args, "--depth", "1")
 	}
@@ -80,7 +85,7 @@ func fetchRef(ctx context.Context, retry Retry, dst, ref string, full bool) erro
 	if target == "" {
 		target = "HEAD" //nolint:goconst // Git's default ref is clearest by its literal name.
 	}
-	args := []string{"-c", "credential.helper=", "-C", dst, "fetch", "--quiet"} //nolint:goconst // Git argv is clearer with literal subcommands and flags.
+	args := []string{"-C", dst, "fetch", "--quiet"} //nolint:goconst // Git argv is clearer with literal subcommands and flags.
 	if full {
 		out, _ := policy.Run(ctx, "", nil, "-C", dst, "rev-parse", "--is-shallow-repository")
 		if strings.TrimSpace(out) == "true" {
