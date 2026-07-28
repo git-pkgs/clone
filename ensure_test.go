@@ -54,6 +54,8 @@ func newOriginFixture(t *testing.T) originFixture {
 	t.Setenv("GIT_CONFIG_VALUE_0", url)
 	t.Setenv("GIT_CONFIG_KEY_1", "protocol.file.allow")
 	t.Setenv("GIT_CONFIG_VALUE_1", "always")
+	// remoteEnv defaults to https-only; the fixture routes through file://.
+	t.Setenv("GIT_ALLOW_PROTOCOL", "https:file")
 
 	return originFixture{
 		dir:        dir,

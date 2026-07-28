@@ -9,6 +9,7 @@ func TestValidateURL(t *testing.T) {
 	for _, url := range []string{
 		"https://github.com/git-pkgs/clone",
 		"https://gitlab.com/example/repo.git",
+		"https://token@github.com/private/repo",
 	} {
 		if err := ValidateURL(url); err != nil {
 			t.Errorf("ValidateURL(%q): %v", url, err)
@@ -21,13 +22,44 @@ func TestValidateURL(t *testing.T) {
 		"ssh://git@example.com/repo",
 		"file:///etc/passwd",
 		"--upload-pack=/bin/sh",
+		"https://",           // no host
+		"https://\nhost/x",   // control byte
+		"https://host/x\x00", // NUL
 		"",
 	} {
 		if err := ValidateURL(url); err == nil {
 			t.Errorf("ValidateURL(%q) succeeded", url)
 		}
+		if err := ValidateURL(url); err != nil && strings.Contains(err.Error(), "token") {
+			t.Errorf("ValidateURL(%q) error leaks credential: %v", url, err)
+		}
 	}
 }
+
+func TestRedactURL(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"https://github.com/x/y", "https://github.com/x/y"},
+		{"https://token@github.com/x/y", "https://REDACTED@github.com/x/y"},
+		{"https://user:pass@host/p", "https://REDACTED@host/p"},
+		{"not a url at all", "not a url at all"},
+	}
+	for _, c := range cases {
+		if got := RedactURL(c.in); got != c.want {
+			t.Errorf("RedactURL(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// UnreachableError.Error must not leak the credential.
+	e := &UnreachableError{URL: "https://secret@host/repo", Err: errFixture}
+	if strings.Contains(e.Error(), "secret") {
+		t.Errorf("UnreachableError.Error() leaked credential: %q", e.Error())
+	}
+}
+
+var errFixture = &fixtureErr{}
+
+type fixtureErr struct{}
+
+func (*fixtureErr) Error() string { return "boom" }
 
 func TestValidateRef(t *testing.T) {
 	for _, ref := range []string{

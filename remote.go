@@ -16,7 +16,7 @@ func RemoteBranches(ctx context.Context, retry Retry, url string) ([]string, err
 	out, err := retry.Do(ctx, Command{
 		Args:  []string{"-c", "credential.helper=", "ls-remote", "--heads", "--", url}, //nolint:goconst // Git argv is clearer with literal subcommands.
 		Label: "ls-remote",                                                             //nolint:goconst // Retry notices use the literal Git subcommand.
-		Env:   []string{"GIT_TERMINAL_PROMPT=0"},
+		Env:   remoteEnv(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", strings.TrimSpace(out), err)
@@ -30,9 +30,9 @@ func RemoteHead(ctx context.Context, retry Retry, url string) (string, error) {
 		return "", err
 	}
 	out, err := retry.Do(ctx, Command{
-		Args:  []string{"ls-remote", "--", url, "HEAD"}, //nolint:goconst // Git argv is clearer with literal subcommands and refs.
-		Label: "ls-remote",                              //nolint:goconst // Retry notices use the literal Git subcommand.
-		Env:   []string{"GIT_TERMINAL_PROMPT=0"},
+		Args:  []string{"-c", "credential.helper=", "ls-remote", "--", url, "HEAD"}, //nolint:goconst // Git argv is clearer with literal subcommands and refs.
+		Label: "ls-remote",                                                          //nolint:goconst // Retry notices use the literal Git subcommand.
+		Env:   remoteEnv(),
 	})
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", strings.TrimSpace(out), err)
@@ -43,7 +43,7 @@ func RemoteHead(ctx context.Context, retry Retry, url string) (string, error) {
 			return strings.TrimSpace(sha), nil
 		}
 	}
-	return "", fmt.Errorf("no HEAD in ls-remote output for %q", url)
+	return "", fmt.Errorf("no HEAD in ls-remote output for %q", RedactURL(url))
 }
 
 func parseRemoteHeads(out string) []string {

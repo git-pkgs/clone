@@ -26,6 +26,20 @@ func gitTestEnv() []string {
 	)
 }
 
+// subcommand returns the git subcommand from an argv that may be prefixed
+// with `-c key=value` config overrides or `-C dir`.
+func subcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-c", "-C":
+			i++
+		default:
+			return args[i]
+		}
+	}
+	return ""
+}
+
 func runGitTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)

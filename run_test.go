@@ -5,10 +5,31 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestRemoteEnv(t *testing.T) {
+	got := remoteEnv()
+	for _, want := range []string{
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_PROTOCOL_FROM_USER=0",
+		"GIT_ALLOW_PROTOCOL=https",
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("remoteEnv() = %v, missing %q", got, want)
+		}
+	}
+	// A caller that sets GIT_ALLOW_PROTOCOL keeps its own value; the
+	// function must not override it, or tests using file:// via insteadOf
+	// (and callers with a legitimate need for another protocol) break.
+	t.Setenv("GIT_ALLOW_PROTOCOL", "https:file")
+	if slices.Contains(remoteEnv(), "GIT_ALLOW_PROTOCOL=https") {
+		t.Errorf("remoteEnv() overrode caller's GIT_ALLOW_PROTOCOL: %v", remoteEnv())
+	}
+}
 
 func TestRunUsesDirectoryAndEnvironment(t *testing.T) {
 	requireGit(t)

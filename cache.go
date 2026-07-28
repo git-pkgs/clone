@@ -81,12 +81,13 @@ func (c *Cache) EnsureCommit(ctx context.Context, url, commit string) error {
 		return nil
 	}
 	out, err := policy.Do(ctx, Command{
-		Args:  []string{"fetch", "--unshallow", "--quiet", "origin"}, //nolint:goconst // Git argv is clearer with literal subcommands and flags.
-		Label: "fetch",                                               //nolint:goconst // Retry notices use the literal Git subcommand.
+		Args:  []string{"-c", "credential.helper=", "fetch", "--unshallow", "--quiet", "origin"}, //nolint:goconst // Git argv is clearer with literal subcommands and flags.
+		Label: "fetch",                                                                           //nolint:goconst // Retry notices use the literal Git subcommand.
 		Dir:   cacheSrc,
+		Env:   remoteEnv(),
 	})
 	if err != nil {
-		return fmt.Errorf("unshallow %s: %s: %w", url, strings.TrimSpace(out), err)
+		return fmt.Errorf("unshallow %s: %s: %w", RedactURL(url), strings.TrimSpace(out), err)
 	}
 	return nil
 }
@@ -109,11 +110,11 @@ func commitReachable(ctx context.Context, run Runner, dir, commit string) bool {
 }
 
 func pathsOverlap(first, second string) (bool, error) {
-	first, err := filepath.Abs(first)
+	first, err := realAbs(first)
 	if err != nil {
 		return false, err
 	}
-	second, err = filepath.Abs(second)
+	second, err = realAbs(second)
 	if err != nil {
 		return false, err
 	}
@@ -126,6 +127,35 @@ func pathsOverlap(first, second string) (bool, error) {
 		return false, err
 	}
 	return firstContainsSecond || secondContainsFirst, nil
+}
+
+// realAbs resolves symlinks in the deepest existing ancestor of p and returns
+// the absolute path with the not-yet-existing tail rejoined. filepath.Abs
+// alone does not follow symlinks, so a symlinked ancestor of dst could
+// otherwise pass pathsOverlap while pointing inside c.Root.
+func realAbs(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	existing := abs
+	var tail []string
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		}
+		tail = append([]string{filepath.Base(existing)}, tail...)
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			break
+		}
+		existing = parent
+	}
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(append([]string{resolved}, tail...)...), nil
 }
 
 func pathContains(parent, child string) (bool, error) {

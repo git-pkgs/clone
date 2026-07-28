@@ -148,7 +148,7 @@ func TestCacheEnsureCommitRetriesUnshallowFetch(t *testing.T) {
 	fetchCalls := 0
 	cache.Retry = Retry{
 		Run: func(_ context.Context, _ string, _ []string, args ...string) (string, error) {
-			switch args[0] {
+			switch subcommand(args) {
 			case "cat-file":
 				return "", errors.New("missing object")
 			case "rev-parse":

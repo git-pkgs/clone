@@ -92,3 +92,21 @@ func TestBlobRejectsInvalidLimit(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestBlobRejectsInvalidCommitAndPath(t *testing.T) {
+	// The reason Blob validates internally rather than trusting the caller:
+	// git show --output=/path:x writes HEAD's log to /path:x. Without the
+	// ValidCommit gate and --end-of-options, an unvalidated commit reaching
+	// argv is arbitrary-path file write.
+	dir := t.TempDir()
+	for _, c := range []string{"--output=/tmp/x", "HEAD", "abcg", ""} {
+		if _, _, _, err := Blob(context.Background(), dir, c, "file", 100); err == nil {
+			t.Errorf("Blob(commit=%q) should reject invalid commit", c)
+		}
+	}
+	for _, p := range []string{"../etc/passwd", "/abs", "", "x\x00y"} {
+		if _, _, _, err := Blob(context.Background(), dir, "deadbeef", p, 100); err == nil {
+			t.Errorf("Blob(path=%q) should reject invalid path", p)
+		}
+	}
+}

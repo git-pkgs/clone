@@ -37,8 +37,8 @@ func TestRemoteBranchesUsesHardenedGitInvocation(t *testing.T) {
 	if !slices.Equal(branches, []string{"main", "z"}) {
 		t.Errorf("branches = %v", branches)
 	}
-	if !slices.Equal(gotEnv, []string{"GIT_TERMINAL_PROMPT=0"}) {
-		t.Errorf("env = %v", gotEnv)
+	if !slices.Equal(gotEnv, remoteEnv()) {
+		t.Errorf("env = %v, want %v", gotEnv, remoteEnv())
 	}
 	wantArgs := []string{
 		"-c", "credential.helper=", "ls-remote", "--heads", "--", "https://example.com/repo",
@@ -51,10 +51,10 @@ func TestRemoteBranchesUsesHardenedGitInvocation(t *testing.T) {
 func TestRemoteHeadReturnsAdvertisedHead(t *testing.T) {
 	retry := Retry{
 		Run: func(_ context.Context, _ string, env []string, args ...string) (string, error) {
-			if !slices.Equal(env, []string{"GIT_TERMINAL_PROMPT=0"}) {
-				t.Errorf("env = %v", env)
+			if !slices.Equal(env, remoteEnv()) {
+				t.Errorf("env = %v, want %v", env, remoteEnv())
 			}
-			want := []string{"ls-remote", "--", "https://example.com/repo", "HEAD"}
+			want := []string{"-c", "credential.helper=", "ls-remote", "--", "https://example.com/repo", "HEAD"}
 			if !slices.Equal(args, want) {
 				t.Errorf("args = %v, want %v", args, want)
 			}

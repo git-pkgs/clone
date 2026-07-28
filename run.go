@@ -9,6 +9,25 @@ import (
 
 const DefaultWaitDelay = 10 * time.Second
 
+// remoteEnv is the hardening env every remote-touching Git invocation in this
+// package sets. GIT_ALLOW_PROTOCOL is a hard whitelist that overrides
+// protocol.*.allow config, so an ambient url.<base>.insteadOf that rewrites an
+// https:// URL to file://, ssh://, or ext:: is refused after ValidateURL has
+// already approved the input. A caller that needs another protocol (or a test
+// using file:// via insteadOf) sets GIT_ALLOW_PROTOCOL in its own env; the
+// value here defers to that. GIT_PROTOCOL_FROM_USER=0 is kept for older Git
+// that predates GIT_ALLOW_PROTOCOL.
+func remoteEnv() []string {
+	env := []string{
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_PROTOCOL_FROM_USER=0",
+	}
+	if os.Getenv("GIT_ALLOW_PROTOCOL") == "" {
+		env = append(env, "GIT_ALLOW_PROTOCOL=https")
+	}
+	return env
+}
+
 // Runner runs one Git invocation and returns its combined output.
 type Runner func(ctx context.Context, dir string, env []string, args ...string) (string, error)
 

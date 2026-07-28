@@ -18,7 +18,7 @@ type UnreachableError struct {
 }
 
 func (e *UnreachableError) Error() string {
-	return fmt.Sprintf("repository unreachable %s: %s", e.URL, e.Err)
+	return fmt.Sprintf("repository unreachable %s: %s", RedactURL(e.URL), e.Err)
 }
 
 func (e *UnreachableError) Unwrap() error {
@@ -54,14 +54,14 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, full bool) e
 		return err
 	}
 
-	args := []string{"clone", "--quiet"} //nolint:goconst // Git argv is clearer with literal subcommands and flags.
+	args := []string{"-c", "credential.helper=", "clone", "--quiet"} //nolint:goconst // Git argv is clearer with literal subcommands and flags.
 	if !full {
 		args = append(args, "--depth", "1")
 	}
 	args = append(args, "--", url, dst)
 	out, err := retry.Do(ctx, Command{
 		Label: "clone",
-		Env:   []string{"GIT_PROTOCOL_FROM_USER=0"},
+		Env:   remoteEnv(),
 		Args:  args,
 		Reset: DestReset(dst),
 	})
@@ -80,7 +80,7 @@ func fetchRef(ctx context.Context, retry Retry, dst, ref string, full bool) erro
 	if target == "" {
 		target = "HEAD" //nolint:goconst // Git's default ref is clearest by its literal name.
 	}
-	args := []string{"-C", dst, "fetch", "--quiet"} //nolint:goconst // Git argv is clearer with literal subcommands and flags.
+	args := []string{"-c", "credential.helper=", "-C", dst, "fetch", "--quiet"} //nolint:goconst // Git argv is clearer with literal subcommands and flags.
 	if full {
 		out, _ := policy.Run(ctx, "", nil, "-C", dst, "rev-parse", "--is-shallow-repository")
 		if strings.TrimSpace(out) == "true" {
@@ -90,6 +90,7 @@ func fetchRef(ctx context.Context, retry Retry, dst, ref string, full bool) erro
 	args = append(args, "--", "origin", target)
 	out, err := policy.Do(ctx, Command{
 		Label: "fetch", //nolint:goconst // Retry notices use the literal Git subcommand.
+		Env:   remoteEnv(),
 		Args:  args,
 	})
 	if err != nil {
