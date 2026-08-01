@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func requireGit(t *testing.T) {
+func requireGit(t testing.TB) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
@@ -40,7 +40,7 @@ func subcommand(args []string) string {
 	return ""
 }
 
-func runGitTest(t *testing.T, dir string, args ...string) string {
+func runGitTest(t testing.TB, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
