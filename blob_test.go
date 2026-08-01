@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/git-pkgs/magic"
 )
 
-func seedBlobRepository(t *testing.T) (string, string) {
+func seedBlobRepository(t testing.TB) (string, string) {
 	t.Helper()
 	requireGit(t)
 
@@ -20,6 +22,10 @@ func seedBlobRepository(t *testing.T) (string, string) {
 		"big.txt":   bytes.Repeat([]byte("a"), 128<<10),
 		"binary":    {'a', 0, 'b'},
 		"late-nul":  {'a', 'b', 'c', 0},
+		"empty":     {},
+		"png":       []byte("\x89PNG\r\n\x1a\n"),
+		"invalid":   {0xff, 'a'},
+		"utf16le":   {0xff, 0xfe, 'h', 0, 'i', 0},
 	}
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), content, 0o644); err != nil {
@@ -29,6 +35,183 @@ func seedBlobRepository(t *testing.T) (string, string) {
 	runGitTest(t, dir, "add", ".")
 	runGitTest(t, dir, "commit", "--quiet", "-m", "files")
 	return dir, runGitTest(t, dir, "rev-parse", "HEAD")
+}
+
+func BenchmarkBlob(b *testing.B) {
+	dir, commit := seedBlobRepository(b)
+	b.ReportAllocs()
+
+	for b.Loop() {
+		content, binary, truncated, err := Blob(context.Background(), dir, commit, "exact.txt", 5)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(content) != 5 || binary || truncated {
+			b.Fatal("unexpected Blob result")
+		}
+	}
+}
+
+func BenchmarkInspectBlob(b *testing.B) {
+	dir, commit := seedBlobRepository(b)
+	b.ReportAllocs()
+
+	for b.Loop() {
+		result, err := InspectBlob(context.Background(), dir, commit, "exact.txt", 5)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(result.Content) != 5 || result.Detection.Kind != magic.KindText || result.Truncated {
+			b.Fatal("unexpected InspectBlob result")
+		}
+	}
+}
+
+func TestInspectBlobClassifiesContent(t *testing.T) {
+	dir, commit := seedBlobRepository(t)
+	tests := []struct {
+		name          string
+		path          string
+		maxBytes      int64
+		wantContent   []byte
+		wantDetection magic.Result
+		wantTruncated bool
+	}{
+		{
+			name:        "complete text",
+			path:        "exact.txt",
+			maxBytes:    5,
+			wantContent: []byte("12345"),
+			wantDetection: magic.Result{
+				Kind:     magic.KindText,
+				MIME:     "text/plain",
+				Format:   "text",
+				Encoding: "utf-8",
+			},
+		},
+		{
+			name:          "truncated text",
+			path:          "big.txt",
+			maxBytes:      32,
+			wantContent:   bytes.Repeat([]byte("a"), 32),
+			wantTruncated: true,
+			wantDetection: magic.Result{
+				Kind:     magic.KindText,
+				MIME:     "text/plain",
+				Format:   "text",
+				Encoding: "utf-8",
+				Reason:   magic.ReasonNeedMore,
+			},
+		},
+		{
+			name:        "binary signature without NUL",
+			path:        "png",
+			maxBytes:    8,
+			wantContent: []byte("\x89PNG\r\n\x1a\n"),
+			wantDetection: magic.Result{
+				Kind:   magic.KindBinary,
+				MIME:   "image/png",
+				Format: "png",
+			},
+		},
+		{
+			name:        "invalid UTF-8",
+			path:        "invalid",
+			maxBytes:    2,
+			wantContent: []byte{0xff, 'a'},
+			wantDetection: magic.Result{
+				Kind:   magic.KindUnknown,
+				Reason: magic.ReasonInvalidText,
+			},
+		},
+		{
+			name:        "UTF-16LE",
+			path:        "utf16le",
+			maxBytes:    6,
+			wantContent: []byte{0xff, 0xfe, 'h', 0, 'i', 0},
+			wantDetection: magic.Result{
+				Kind:     magic.KindText,
+				MIME:     "text/plain",
+				Format:   "text",
+				Encoding: "utf-16le",
+			},
+		},
+		{
+			name:          "early NUL",
+			path:          "binary",
+			maxBytes:      3,
+			wantContent:   []byte{'a', 0, 'b'},
+			wantDetection: magic.Result{Kind: magic.KindBinary},
+		},
+		{
+			name:          "NUL beyond limit",
+			path:          "late-nul",
+			maxBytes:      3,
+			wantContent:   []byte("abc"),
+			wantTruncated: true,
+			wantDetection: magic.Result{
+				Kind:     magic.KindText,
+				MIME:     "text/plain",
+				Format:   "text",
+				Encoding: "utf-8",
+				Reason:   magic.ReasonNeedMore,
+			},
+		},
+		{
+			name:        "empty",
+			path:        "empty",
+			maxBytes:    0,
+			wantContent: []byte{},
+			wantDetection: magic.Result{
+				Kind:   magic.KindText,
+				MIME:   "text/plain",
+				Format: "text",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := InspectBlob(context.Background(), dir, commit, tt.path, tt.maxBytes)
+			if err != nil {
+				t.Fatalf("InspectBlob: %v", err)
+			}
+			if !bytes.Equal(result.Content, tt.wantContent) {
+				t.Errorf("Content = %q, want %q", result.Content, tt.wantContent)
+			}
+			if result.Detection != tt.wantDetection {
+				t.Errorf("Detection = %#v, want %#v", result.Detection, tt.wantDetection)
+			}
+			if result.Truncated != tt.wantTruncated {
+				t.Errorf("Truncated = %v, want %v", result.Truncated, tt.wantTruncated)
+			}
+		})
+	}
+}
+
+func TestInspectBlobReportsErrors(t *testing.T) {
+	dir, commit := seedBlobRepository(t)
+	tests := []struct {
+		name     string
+		commit   string
+		path     string
+		maxBytes int64
+		contains string
+	}{
+		{"missing path", commit, "missing.txt", 100, "does not exist"},
+		{"invalid limit", commit, "exact.txt", -1, "non-negative"},
+		{"invalid commit", "HEAD", "exact.txt", 100, "invalid commit"},
+		{"invalid path", commit, "../exact.txt", 100, "invalid path"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := InspectBlob(context.Background(), dir, tt.commit, tt.path, tt.maxBytes)
+			if err == nil || !strings.Contains(err.Error(), tt.contains) {
+				t.Errorf("error = %v, want error containing %q", err, tt.contains)
+			}
+		})
+	}
 }
 
 func TestBlobReadsTextAtLimit(t *testing.T) {

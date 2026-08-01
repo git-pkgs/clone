@@ -1,6 +1,6 @@
 # clone
 
-Go library for programs that keep local checkouts of HTTPS Git repositories. It shells out to the `git` binary, which must be on `PATH`, and has no third-party Go dependencies. The package supports Go 1.25 or later. For in-process object parsing or history walking, use a library such as [go-git](https://github.com/go-git/go-git).
+Go library for programs that keep local checkouts of HTTPS Git repositories. It shells out to the `git` binary, which must be on `PATH`. The package supports Go 1.25 or later. For in-process object parsing or history walking, use a library such as [go-git](https://github.com/go-git/go-git).
 
 ## Install
 
@@ -57,7 +57,9 @@ if err := cache.EnsureCommit(ctx, url, commit); err != nil {
 
 ## Read a file from a commit
 
-`Blob` runs `git show <commit>:<path>` and reads at most `maxBytes+1`, draining the rest of stdout so Git can exit. The extra byte distinguishes content exactly at the limit from truncated content, and a NUL byte within the returned range marks the blob as binary. Check untrusted input with `ValidCommit` and `SanitizePath` before calling it:
+`InspectBlob` runs `git show <commit>:<path>` and reads at most `maxBytes+1`. The extra byte distinguishes content exactly at the limit from truncated content. Complete reads use `magic.Detect`; truncated reads use `magic.DetectPrefix` so the result can report that later bytes may change the classification. The returned content is retained for text, binary, and unknown results.
+
+Both blob functions validate commits and paths before invoking Git. `ValidCommit` and `SanitizePath` are also available when callers need to validate input earlier:
 
 ```go
 path, ok := clone.SanitizePath("cmd/tool/main.go")
@@ -65,7 +67,7 @@ if !ok || !clone.ValidCommit(commit) {
     log.Fatal("invalid commit or path")
 }
 
-content, binary, truncated, err := clone.Blob(
+result, err := clone.InspectBlob(
     ctx,
     filepath.Join(cache.Dir(url), "src"),
     commit,
@@ -75,11 +77,16 @@ content, binary, truncated, err := clone.Blob(
 if err != nil {
     log.Fatal(err)
 }
-if !binary {
-    fmt.Printf("%s", content)
+if result.Detection.Kind == magic.KindText &&
+    result.Detection.Encoding == "utf-8" {
+    fmt.Printf("%s", result.Content)
 }
-fmt.Println("truncated:", truncated)
+fmt.Println("truncated:", result.Truncated)
 ```
+
+`Blob` remains available for callers that only need its original NUL-based
+binary flag. It returns nil content when a NUL occurs within the returned range;
+a NUL beyond `maxBytes` is not observed.
 
 ## Remote queries
 

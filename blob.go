@@ -9,24 +9,65 @@ import (
 	"math"
 	"os/exec"
 	"strings"
+
+	"github.com/git-pkgs/magic"
 )
+
+// BlobResult contains a bounded blob read and its content classification.
+type BlobResult struct {
+	Content   []byte
+	Detection magic.Result
+	Truncated bool
+}
+
+// InspectBlob reads path from commit in dir and classifies the returned bytes.
+// It uses prefix detection when maxBytes truncates the blob. commit and path
+// are validated with ValidCommit and SanitizePath before reaching Git.
+func InspectBlob(ctx context.Context, dir, commit, blobPath string, maxBytes int64) (BlobResult, error) {
+	content, truncated, err := readBlob(ctx, dir, commit, blobPath, maxBytes)
+	if err != nil {
+		return BlobResult{}, err
+	}
+
+	detection := magic.Detect(content)
+	if truncated {
+		detection = magic.DetectPrefix(content)
+	}
+
+	return BlobResult{
+		Content:   content,
+		Detection: detection,
+		Truncated: truncated,
+	}, nil
+}
 
 // Blob reads path from commit in dir. It caps content at maxBytes and reports
 // whether the blob is binary or was truncated. commit and path are validated
 // with ValidCommit and SanitizePath before reaching Git.
 func Blob(ctx context.Context, dir, commit, blobPath string, maxBytes int64) (content []byte, binary, truncated bool, err error) {
+	content, truncated, err = readBlob(ctx, dir, commit, blobPath, maxBytes)
+	if err != nil {
+		return nil, false, false, err
+	}
+	if bytes.IndexByte(content, 0) != -1 {
+		return nil, true, truncated, nil
+	}
+	return content, false, truncated, nil
+}
+
+func readBlob(ctx context.Context, dir, commit, blobPath string, maxBytes int64) (content []byte, truncated bool, err error) {
 	if maxBytes < 0 {
-		return nil, false, false, fmt.Errorf("maxBytes must be non-negative")
+		return nil, false, fmt.Errorf("maxBytes must be non-negative")
 	}
 	if maxBytes == math.MaxInt64 {
-		return nil, false, false, fmt.Errorf("maxBytes is too large")
+		return nil, false, fmt.Errorf("maxBytes is too large")
 	}
 	if !ValidCommit(commit) {
-		return nil, false, false, fmt.Errorf("invalid commit %q", commit)
+		return nil, false, fmt.Errorf("invalid commit %q", commit)
 	}
 	clean, ok := SanitizePath(blobPath)
 	if !ok {
-		return nil, false, false, fmt.Errorf("invalid path %q", blobPath)
+		return nil, false, fmt.Errorf("invalid path %q", blobPath)
 	}
 
 	// --end-of-options stops a commit or path that somehow slipped past the
@@ -35,12 +76,12 @@ func Blob(ctx context.Context, dir, commit, blobPath string, maxBytes int64) (co
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "show", "--end-of-options", commit+":"+clean)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, false, false, err
+		return nil, false, err
 	}
 	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf
 	if err := cmd.Start(); err != nil {
-		return nil, false, false, err
+		return nil, false, err
 	}
 
 	raw, readErr := io.ReadAll(io.LimitReader(stdout, maxBytes+1))
@@ -60,13 +101,10 @@ func Blob(ctx context.Context, dir, commit, blobPath string, maxBytes int64) (co
 		if message == "" {
 			message = waitErr.Error()
 		}
-		return nil, false, false, errors.New(message)
+		return nil, false, errors.New(message)
 	}
 	if readErr != nil {
-		return nil, false, false, readErr
+		return nil, false, readErr
 	}
-	if bytes.IndexByte(raw, 0) != -1 {
-		return nil, true, truncated, nil
-	}
-	return raw, false, truncated, nil
+	return raw, truncated, nil
 }
