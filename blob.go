@@ -29,9 +29,11 @@ func InspectBlob(ctx context.Context, dir, commit, blobPath string, maxBytes int
 		return BlobResult{}, err
 	}
 
-	detection := magic.Detect(content)
+	var detection magic.Result
 	if truncated {
 		detection = magic.DetectPrefix(content)
+	} else {
+		detection = magic.Detect(content)
 	}
 
 	return BlobResult{
