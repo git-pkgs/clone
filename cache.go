@@ -80,7 +80,7 @@ func (c *Cache) EnsureCommit(ctx context.Context, url, commit string) error {
 	if strings.TrimSpace(out) != "true" {
 		return nil
 	}
-	out, err := policy.Do(ctx, Command{
+	out, err := doPinnedURL(ctx, policy, url, Command{
 		Args:  []string{"fetch", "--unshallow", "--quiet", "origin"}, //nolint:goconst // Git argv is clearer with literal subcommands and flags.
 		Label: "fetch",                                               //nolint:goconst // Retry notices use the literal Git subcommand.
 		Dir:   cacheSrc,

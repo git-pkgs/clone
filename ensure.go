@@ -48,7 +48,7 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, full bool) e
 		return err
 	}
 	if _, err := os.Stat(filepath.Join(dst, ".git")); err == nil {
-		return fetchRef(ctx, retry, dst, ref, full)
+		return fetchRef(ctx, retry, url, dst, ref, full)
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), dirPerm); err != nil {
 		return err
@@ -64,7 +64,7 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, full bool) e
 		args = append(args, "--depth", "1")
 	}
 	args = append(args, "--", url, dst)
-	out, err := retry.Do(ctx, Command{
+	out, err := doPinnedURL(ctx, retry, url, Command{
 		Label: "clone",
 		Env:   remoteEnv(),
 		Args:  args,
@@ -74,12 +74,15 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, full bool) e
 		return fmt.Errorf("%s: %w", strings.TrimSpace(out), err)
 	}
 	if ref != "" {
-		return fetchRef(ctx, retry, dst, ref, full)
+		return fetchRef(ctx, retry, url, dst, ref, full)
 	}
 	return nil
 }
 
-func fetchRef(ctx context.Context, retry Retry, dst, ref string, full bool) error {
+// fetchRef takes url only so it can be pinned against ambient insteadOf
+// rewriting: the fetch addresses the remote by name, but Git resolves origin's
+// stored URL -- the validated one clone recorded -- through the same rules.
+func fetchRef(ctx context.Context, retry Retry, url, dst, ref string, full bool) error {
 	policy := retry.Resolved()
 	target := ref
 	if target == "" {
@@ -93,7 +96,7 @@ func fetchRef(ctx context.Context, retry Retry, dst, ref string, full bool) erro
 		}
 	}
 	args = append(args, "--", "origin", target)
-	out, err := policy.Do(ctx, Command{
+	out, err := doPinnedURL(ctx, policy, url, Command{
 		Label: "fetch", //nolint:goconst // Retry notices use the literal Git subcommand.
 		Env:   remoteEnv(),
 		Args:  args,
