@@ -13,7 +13,7 @@ func RemoteBranches(ctx context.Context, retry Retry, url string) ([]string, err
 	if err := ValidateURL(url); err != nil {
 		return nil, err
 	}
-	out, err := retry.Do(ctx, Command{
+	out, err := doPinnedURL(ctx, retry, url, Command{
 		Args:  []string{"-c", "credential.helper=", "ls-remote", "--heads", "--", url}, //nolint:goconst // Git argv is clearer with literal subcommands.
 		Label: "ls-remote",                                                             //nolint:goconst // Retry notices use the literal Git subcommand.
 		Env:   remoteEnv(),
@@ -29,7 +29,7 @@ func RemoteHead(ctx context.Context, retry Retry, url string) (string, error) {
 	if err := ValidateURL(url); err != nil {
 		return "", err
 	}
-	out, err := retry.Do(ctx, Command{
+	out, err := doPinnedURL(ctx, retry, url, Command{
 		Args:  []string{"-c", "credential.helper=", "ls-remote", "--", url, "HEAD"}, //nolint:goconst // Git argv is clearer with literal subcommands and refs.
 		Label: "ls-remote",                                                          //nolint:goconst // Retry notices use the literal Git subcommand.
 		Env:   remoteEnv(),
