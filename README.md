@@ -1,6 +1,6 @@
 # clone
 
-Go library for programs that keep local checkouts of HTTPS Git repositories. It shells out to the `git` binary, which must be on `PATH`. The package supports Go 1.25 or later. For in-process object parsing or history walking, use a library such as [go-git](https://github.com/go-git/go-git).
+Go library for programs that keep local checkouts of HTTPS Git repositories. Clone, fetch, remote queries, and command retries shell out to the `git` binary, which must be on `PATH`. Blob reads use [go-git](https://github.com/go-git/go-git) in process. The package supports Go 1.25 or later.
 
 ## Install
 
@@ -57,9 +57,9 @@ if err := cache.EnsureCommit(ctx, url, commit); err != nil {
 
 ## Read a file from a commit
 
-`InspectBlob` runs `git show <commit>:<path>` and reads at most `maxBytes+1`. The extra byte distinguishes content exactly at the limit from truncated content. Complete reads use `magic.Detect`; truncated reads use `magic.DetectPrefix` so the result can report that later bytes may change the classification. The returned content is retained for text, binary, and unknown results.
+`InspectBlob` reads the object in process and reads at most `maxBytes+1`. The extra byte distinguishes content exactly at the limit from truncated content. Complete reads use `magic.Detect`; truncated reads use `magic.DetectPrefix` so the result can report that later bytes may change the classification. The returned content is retained for text, binary, and unknown results. Repositories using object formats unsupported by go-git fall back to `git show`.
 
-Both blob functions validate commits and paths before invoking Git. `ValidCommit` and `SanitizePath` are also available when callers need to validate input earlier:
+Both blob functions validate commits and paths before reading the repository. `ValidCommit` and `SanitizePath` are also available when callers need to validate input earlier:
 
 ```go
 path, ok := clone.SanitizePath("cmd/tool/main.go")

@@ -11,7 +11,12 @@ import (
 	"strings"
 
 	"github.com/git-pkgs/magic"
+	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
+
+const goGitV5SHA1HexLength = 40
 
 // BlobResult contains a bounded blob read and its content classification.
 type BlobResult struct {
@@ -22,7 +27,8 @@ type BlobResult struct {
 
 // InspectBlob reads path from commit in dir and classifies the returned bytes.
 // It uses prefix detection when maxBytes truncates the blob. commit and path
-// are validated with ValidCommit and SanitizePath before reaching Git.
+// are validated with ValidCommit and SanitizePath before reading the
+// repository.
 func InspectBlob(ctx context.Context, dir, commit, blobPath string, maxBytes int64) (BlobResult, error) {
 	content, truncated, err := readBlob(ctx, dir, commit, blobPath, maxBytes)
 	if err != nil {
@@ -45,7 +51,7 @@ func InspectBlob(ctx context.Context, dir, commit, blobPath string, maxBytes int
 
 // Blob reads path from commit in dir. It caps content at maxBytes and reports
 // whether the blob is binary or was truncated. commit and path are validated
-// with ValidCommit and SanitizePath before reaching Git.
+// with ValidCommit and SanitizePath before reading the repository.
 func Blob(ctx context.Context, dir, commit, blobPath string, maxBytes int64) (content []byte, binary, truncated bool, err error) {
 	content, truncated, err = readBlob(ctx, dir, commit, blobPath, maxBytes)
 	if err != nil {
@@ -71,7 +77,85 @@ func readBlob(ctx context.Context, dir, commit, blobPath string, maxBytes int64)
 	if !ok {
 		return nil, false, fmt.Errorf("invalid path %q", blobPath)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 
+	// go-git v5 reads SHA-1 object stores. Keep native Git as a compatibility
+	// path for repositories using longer object IDs.
+	if len(commit) > goGitV5SHA1HexLength {
+		return readBlobWithGit(ctx, dir, commit, clean, maxBytes)
+	}
+
+	repo, err := git.PlainOpenWithOptions(dir, &git.PlainOpenOptions{
+		DetectDotGit:          true,
+		EnableDotGitCommonDir: true,
+	})
+	if err != nil {
+		// go-git v5 can reject repositories that native Git supports without
+		// returning a typed compatibility error. SHA-256 object stores are one
+		// example, including when commit is an abbreviated object ID.
+		return readBlobWithGit(ctx, dir, commit, clean, maxBytes)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+
+	hash, err := repo.ResolveRevision(plumbing.Revision(commit))
+	if err != nil {
+		return nil, false, fmt.Errorf("resolve commit %q: %w", commit, err)
+	}
+	commitObject, err := repo.CommitObject(*hash)
+	if err != nil {
+		return nil, false, fmt.Errorf("read commit %q: %w", commit, err)
+	}
+	file, err := commitObject.File(clean)
+	if err != nil {
+		if errors.Is(err, object.ErrFileNotFound) {
+			return nil, false, fmt.Errorf("path %q does not exist in %q", clean, commit)
+		}
+		return nil, false, fmt.Errorf("read path %q: %w", clean, err)
+	}
+	reader, err := file.Reader()
+	if err != nil {
+		return nil, false, fmt.Errorf("open blob %q: %w", clean, err)
+	}
+
+	raw, readErr := io.ReadAll(io.LimitReader(contextReader{ctx: ctx, reader: reader}, maxBytes+1))
+	closeErr := reader.Close()
+	if readErr != nil {
+		return nil, false, readErr
+	}
+	if closeErr != nil {
+		return nil, false, closeErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	truncated = int64(len(raw)) > maxBytes
+	if truncated {
+		raw = raw[:maxBytes]
+	}
+	return raw, truncated, nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(p)
+	if err == nil {
+		err = r.ctx.Err()
+	}
+	return n, err
+}
+
+func readBlobWithGit(ctx context.Context, dir, commit, clean string, maxBytes int64) (content []byte, truncated bool, err error) {
 	// --end-of-options stops a commit or path that somehow slipped past the
 	// validators from being parsed as a git-show flag. commit is validated to
 	// hex above, so this is defence in depth rather than the primary guard.

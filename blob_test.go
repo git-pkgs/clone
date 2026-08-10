@@ -3,7 +3,9 @@ package clone
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -222,6 +224,103 @@ func TestBlobReadsTextAtLimit(t *testing.T) {
 	}
 	if string(content) != "12345" || binary || truncated {
 		t.Errorf("Blob = (%q, %v, %v), want exact text", content, binary, truncated)
+	}
+}
+
+func TestBlobReadsWithoutGitOnPath(t *testing.T) {
+	dir, commit := seedBlobRepository(t)
+	t.Setenv("PATH", t.TempDir())
+
+	content, binary, truncated, err := Blob(context.Background(), dir, commit, "exact.txt", 5)
+	if err != nil {
+		t.Fatalf("Blob: %v", err)
+	}
+	if string(content) != "12345" || binary || truncated {
+		t.Errorf("Blob = (%q, %v, %v), want exact text", content, binary, truncated)
+	}
+}
+
+func TestBlobReadsPackedObject(t *testing.T) {
+	dir, commit := seedBlobRepository(t)
+	runGitTest(t, dir, "gc", "--quiet", "--prune=now")
+
+	content, binary, truncated, err := Blob(context.Background(), dir, commit, "exact.txt", 5)
+	if err != nil {
+		t.Fatalf("Blob: %v", err)
+	}
+	if string(content) != "12345" || binary || truncated {
+		t.Errorf("Blob = (%q, %v, %v), want exact text", content, binary, truncated)
+	}
+}
+
+func TestBlobReadsLinkedWorktree(t *testing.T) {
+	dir, commit := seedBlobRepository(t)
+	worktree := filepath.Join(t.TempDir(), "checkout")
+	runGitTest(t, dir, "worktree", "add", "--quiet", "--detach", worktree, commit)
+
+	content, binary, truncated, err := Blob(context.Background(), worktree, commit, "exact.txt", 5)
+	if err != nil {
+		t.Fatalf("Blob: %v", err)
+	}
+	if string(content) != "12345" || binary || truncated {
+		t.Errorf("Blob = (%q, %v, %v), want exact text", content, binary, truncated)
+	}
+}
+
+func TestBlobResolvesAbbreviatedCommitFromSubdirectory(t *testing.T) {
+	dir, commit := seedBlobRepository(t)
+	nested := filepath.Join(dir, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	content, binary, truncated, err := Blob(context.Background(), nested, commit[:8], "exact.txt", 5)
+	if err != nil {
+		t.Fatalf("Blob: %v", err)
+	}
+	if string(content) != "12345" || binary || truncated {
+		t.Errorf("Blob = (%q, %v, %v), want exact text", content, binary, truncated)
+	}
+}
+
+func TestBlobHonorsCanceledContext(t *testing.T) {
+	dir, commit := seedBlobRepository(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, _, err := Blob(ctx, dir, commit, "exact.txt", 5)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestBlobReadsSHA256RepositoryWithGitFallback(t *testing.T) {
+	requireGit(t)
+	dir := t.TempDir()
+	cmd := exec.Command("git", "init", "--quiet", "--object-format=sha256", "-b", "main")
+	cmd.Dir = dir
+	cmd.Env = gitTestEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("git does not support SHA-256 repositories: %s", out)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, dir, "add", "file.txt")
+	runGitTest(t, dir, "commit", "--quiet", "-m", "file")
+	commit := runGitTest(t, dir, "rev-parse", "HEAD")
+	if len(commit) != 64 {
+		t.Fatalf("SHA-256 commit length = %d, want 64", len(commit))
+	}
+
+	for _, revision := range []string{commit, commit[:12]} {
+		content, binary, truncated, err := Blob(context.Background(), dir, revision, "file.txt", 7)
+		if err != nil {
+			t.Fatalf("Blob(%q): %v", revision, err)
+		}
+		if string(content) != "content" || binary || truncated {
+			t.Errorf("Blob(%q) = (%q, %v, %v), want exact text", revision, content, binary, truncated)
+		}
 	}
 }
 
