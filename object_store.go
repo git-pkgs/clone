@@ -131,7 +131,7 @@ func findGitDirs(dir string) (gitDir, commonDir string, err error) {
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return "", "", fmt.Errorf("repository does not exist")
+			return "", "", fmt.Errorf("no Git repository found from %q", start)
 		}
 	}
 }

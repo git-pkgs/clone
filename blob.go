@@ -76,8 +76,8 @@ func readBlob(ctx context.Context, dir, commit, blobPath string, maxBytes int64)
 		return nil, false, err
 	}
 
-	raw, truncated, err := readBlobWithGoGit(ctx, dir, commit, clean, maxBytes)
-	if err == nil {
+	raw, truncated, goGitErr := readBlobWithGoGit(ctx, dir, commit, clean, maxBytes)
+	if goGitErr == nil {
 		return raw, truncated, nil
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -87,7 +87,14 @@ func readBlob(ctx context.Context, dir, commit, blobPath string, maxBytes int64)
 	// repository layouts that go-git v5 cannot read. This also covers
 	// abbreviated SHA-256 object IDs, whose length alone does not identify the
 	// repository's object format.
-	return readBlobWithGit(ctx, dir, commit, clean, maxBytes)
+	raw, truncated, gitErr := readBlobWithGit(ctx, dir, commit, clean, maxBytes)
+	if gitErr != nil {
+		return nil, false, errors.Join(
+			fmt.Errorf("go-git blob read: %w", goGitErr),
+			fmt.Errorf("git blob read: %w", gitErr),
+		)
+	}
+	return raw, truncated, nil
 }
 
 type contextReader struct {

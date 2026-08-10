@@ -341,6 +341,19 @@ func TestBlobHonorsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestBlobPreservesGoGitAndGitErrors(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", t.TempDir())
+
+	_, _, _, err := Blob(context.Background(), dir, strings.Repeat("a", 40), "file.txt", 5)
+	if !errors.Is(err, exec.ErrNotFound) {
+		t.Errorf("error = %v, want exec.ErrNotFound", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), dir) {
+		t.Errorf("error = %v, want starting path %q", err, dir)
+	}
+}
+
 func TestBlobReadsSHA256RepositoryWithGitFallback(t *testing.T) {
 	requireGit(t)
 	dir := t.TempDir()
