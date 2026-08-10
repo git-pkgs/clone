@@ -57,7 +57,7 @@ if err := cache.EnsureCommit(ctx, url, commit); err != nil {
 
 ## Read a file from a commit
 
-`InspectBlob` reads the object in process and reads at most `maxBytes+1`. The extra byte distinguishes content exactly at the limit from truncated content. Complete reads use `magic.Detect`; truncated reads use `magic.DetectPrefix` so the result can report that later bytes may change the classification. The returned content is retained for text, binary, and unknown results. Repositories using object formats unsupported by go-git fall back to `git show`.
+`InspectBlob` reads the object in process and returns at most `maxBytes`. The object's size distinguishes content exactly at the limit from truncated content. Complete reads use `magic.Detect`; truncated reads use `magic.DetectPrefix` so the result can report that later bytes may change the classification. The returned content is retained for text, binary, and unknown results. Repositories using object formats unsupported by go-git fall back to `git show`.
 
 Both blob functions validate commits and paths before reading the repository. `ValidCommit` and `SanitizePath` are also available when callers need to validate input earlier:
 
