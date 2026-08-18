@@ -1,6 +1,6 @@
 # clone
 
-Go library for programs that keep local checkouts of HTTPS Git repositories. Clone, fetch, remote queries, and command retries shell out to the `git` binary, which must be on `PATH`. Blob reads use [go-git](https://github.com/go-git/go-git) in process. The package supports Go 1.25 or later.
+Go library for programs that keep local checkouts of HTTPS Git repositories. Clone, fetch, remote queries, command retries, and blob reads shell out to the `git` binary, which must be on `PATH`. Programs that read many blobs can use the optional `gogit` module for in-process object access. Both modules support Go 1.25 or later.
 
 ## Install
 
@@ -79,9 +79,13 @@ if err := cache.EnsureCommit(ctx, url, commit); err != nil {
 
 ## Read a file from a commit
 
-`InspectBlob` reads the object in process and returns at most `maxBytes`. The object's size distinguishes content exactly at the limit from truncated content. Complete reads use `magic.Detect`; truncated reads use `magic.DetectPrefix` so the result can report that later bytes may change the classification. The returned content is retained for text, binary, and unknown results. Repositories using object formats unsupported by go-git fall back to `git show`.
+`clone.InspectBlob` runs `git show` and returns at most `maxBytes`. The optional `github.com/git-pkgs/clone/gogit` module reads the object in process and falls back to `git show` for unsupported object formats and repository layouts. Install it separately when repeated process startup is costly:
 
-Both blob functions validate commits and paths before reading the repository. `ValidCommit` and `SanitizePath` are also available when callers need to validate input earlier:
+```
+go get github.com/git-pkgs/clone/gogit
+```
+
+Both implementations use the object's size to distinguish content exactly at the limit from truncated content. Complete reads use `magic.Detect`; truncated reads use `magic.DetectPrefix` so the result can report that later bytes may change the classification. They retain returned content for text, binary, and unknown results, and validate commits and paths before reading the repository. `ValidCommit` and `SanitizePath` are also available when callers need to validate input earlier:
 
 ```go
 path, ok := clone.SanitizePath("cmd/tool/main.go")
@@ -89,7 +93,7 @@ if !ok || !clone.ValidCommit(commit) {
     log.Fatal("invalid commit or path")
 }
 
-result, err := clone.InspectBlob(
+result, err := gogit.InspectBlob(
     ctx,
     filepath.Join(cache.Dir(url), "src"),
     commit,
@@ -106,9 +110,7 @@ if result.Detection.Kind == magic.KindText &&
 fmt.Println("truncated:", result.Truncated)
 ```
 
-`Blob` remains available for callers that only need its original NUL-based
-binary flag. It returns nil content when a NUL occurs within the returned range;
-a NUL beyond `maxBytes` is not observed.
+`clone.Blob` and `gogit.Blob` are available for callers that only need the original NUL-based binary flag. They return nil content when a NUL occurs within the returned range; a NUL beyond `maxBytes` is not observed.
 
 ## Remote queries
 

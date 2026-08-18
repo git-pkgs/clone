@@ -20,10 +20,10 @@ type BlobResult struct {
 	Truncated bool
 }
 
-// InspectBlob reads path from commit in dir and classifies the returned bytes.
-// It uses prefix detection when maxBytes truncates the blob. commit and path
-// are validated with ValidCommit and SanitizePath before reading the
-// repository.
+// InspectBlob reads path from commit in dir through the git binary and
+// classifies the returned bytes. It uses prefix detection when maxBytes
+// truncates the blob. commit and path are validated with ValidCommit and
+// SanitizePath before invoking Git.
 func InspectBlob(ctx context.Context, dir, commit, blobPath string, maxBytes int64) (BlobResult, error) {
 	content, truncated, err := readBlob(ctx, dir, commit, blobPath, maxBytes)
 	if err != nil {
@@ -44,9 +44,9 @@ func InspectBlob(ctx context.Context, dir, commit, blobPath string, maxBytes int
 	}, nil
 }
 
-// Blob reads path from commit in dir. It caps content at maxBytes and reports
-// whether the blob is binary or was truncated. commit and path are validated
-// with ValidCommit and SanitizePath before reading the repository.
+// Blob reads path from commit in dir through the git binary. It caps content
+// at maxBytes and reports whether the blob is binary or was truncated. commit
+// and path are validated with ValidCommit and SanitizePath before invoking Git.
 func Blob(ctx context.Context, dir, commit, blobPath string, maxBytes int64) (content []byte, binary, truncated bool, err error) {
 	content, truncated, err = readBlob(ctx, dir, commit, blobPath, maxBytes)
 	if err != nil {
@@ -75,42 +75,7 @@ func readBlob(ctx context.Context, dir, commit, blobPath string, maxBytes int64)
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
-
-	raw, truncated, goGitErr := readBlobWithGoGit(ctx, dir, commit, clean, maxBytes)
-	if goGitErr == nil {
-		return raw, truncated, nil
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, false, ctxErr
-	}
-	// Native Git remains the compatibility path for object formats and
-	// repository layouts that go-git v5 cannot read. This also covers
-	// abbreviated SHA-256 object IDs, whose length alone does not identify the
-	// repository's object format.
-	raw, truncated, gitErr := readBlobWithGit(ctx, dir, commit, clean, maxBytes)
-	if gitErr != nil {
-		return nil, false, errors.Join(
-			fmt.Errorf("go-git blob read: %w", goGitErr),
-			fmt.Errorf("git blob read: %w", gitErr),
-		)
-	}
-	return raw, truncated, nil
-}
-
-type contextReader struct {
-	ctx    context.Context
-	reader io.Reader
-}
-
-func (r contextReader) Read(p []byte) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	n, err := r.reader.Read(p)
-	if err == nil {
-		err = r.ctx.Err()
-	}
-	return n, err
+	return readBlobWithGit(ctx, dir, commit, clean, maxBytes)
 }
 
 func readBlobWithGit(ctx context.Context, dir, commit, clean string, maxBytes int64) (content []byte, truncated bool, err error) {
