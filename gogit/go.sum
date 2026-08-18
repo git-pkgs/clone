@@ -12,8 +12,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/emirpasic/gods v1.18.1 h1:FXtiHYKDGKCW2KzwZKx0iC0PQmdlorYgdFG9jPXJ1Bc=
 github.com/emirpasic/gods v1.18.1/go.mod h1:8tpGGwCnJ5H4r6BWwaV6OrWmMoPhUl5jm/FMNAnJvWQ=
-github.com/git-pkgs/clone v0.2.1 h1:9Hl3UgMpGwYGlsUYR2KbMexISMTCDV5/1L7r1FFA/lw=
-github.com/git-pkgs/clone v0.2.1/go.mod h1:lgbobKgJ6XbPZPsbn4iK0fVskYpFr4stjKKCeG9RsRc=
+github.com/git-pkgs/clone v0.3.0 h1:oAInT3fTKFSYfTeiKV7w2+3iBN/ADwu1j8+mblMYC5E=
+github.com/git-pkgs/clone v0.3.0/go.mod h1:3KS1e3TsRZnhsmATI6/xyECQqUp7Ps5bHlZaTDXWp8w=
 github.com/git-pkgs/magic v0.2.0 h1:c7HqVxnP8c88EaVMH0/KraDFVTcmiXckRiSvNZEnvMQ=
 github.com/git-pkgs/magic v0.2.0/go.mod h1:3ndidt+yvFaI1M0aEkkzkOlFnLPkeVQASIUojazcxCI=
 github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 h1:+zs/tPmkDkHx3U66DAb0lQFJrpS6731Oaa12ikc+DiI=
