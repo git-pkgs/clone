@@ -285,7 +285,7 @@ func TestBlobPreservesGoGitAndGitErrors(t *testing.T) {
 	}
 }
 
-func TestBlobFallsBackForSHA256Repository(t *testing.T) {
+func TestBlobAPIsFallBackForSHA256Repository(t *testing.T) {
 	requireGit(t)
 	dir := t.TempDir()
 	cmd := exec.Command("git", "init", "--quiet", "--object-format=sha256", "-b", "main")
@@ -297,7 +297,10 @@ func TestBlobFallsBackForSHA256Repository(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runGitTest(t, dir, "add", "file.txt")
+	if err := os.WriteFile(filepath.Join(dir, "binary"), []byte{'a', 0, 'b'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, dir, "add", "file.txt", "binary")
 	runGitTest(t, dir, "commit", "--quiet", "-m", "file")
 	commit := runGitTest(t, dir, "rev-parse", "HEAD")
 
@@ -308,6 +311,22 @@ func TestBlobFallsBackForSHA256Repository(t *testing.T) {
 		}
 		if string(content) != "content" || binary || truncated {
 			t.Errorf("Blob(%q) = (%q, %v, %v), want exact text", revision, content, binary, truncated)
+		}
+
+		content, binary, truncated, err = Blob(context.Background(), dir, revision, "binary", 3)
+		if err != nil {
+			t.Fatalf("Blob(%q, binary): %v", revision, err)
+		}
+		if content != nil || !binary || truncated {
+			t.Errorf("Blob(%q, binary) = (%q, %v, %v), want complete binary", revision, content, binary, truncated)
+		}
+
+		result, inspectErr := InspectBlob(context.Background(), dir, revision, "binary", 3)
+		if inspectErr != nil {
+			t.Fatalf("InspectBlob(%q): %v", revision, inspectErr)
+		}
+		if !bytes.Equal(result.Content, []byte{'a', 0, 'b'}) || result.Detection.Kind != magic.KindBinary || result.Truncated {
+			t.Errorf("InspectBlob(%q) = %#v, want complete classified binary", revision, result)
 		}
 	}
 }

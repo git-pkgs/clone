@@ -16,9 +16,20 @@ import (
 // returned bytes. It falls back to the git binary when go-git cannot read the
 // repository.
 func InspectBlob(ctx context.Context, dir, commit, blobPath string, maxBytes int64) (clone.BlobResult, error) {
-	content, truncated, err := readBlob(ctx, dir, commit, blobPath, maxBytes)
+	clean, err := validateBlobRequest(ctx, commit, blobPath, maxBytes)
 	if err != nil {
 		return clone.BlobResult{}, err
+	}
+	content, truncated, goGitErr := readBlobWithGoGit(ctx, dir, commit, clean, maxBytes)
+	if goGitErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return clone.BlobResult{}, ctxErr
+		}
+		result, gitErr := clone.InspectBlob(ctx, dir, commit, clean, maxBytes)
+		if gitErr != nil {
+			return clone.BlobResult{}, combineBlobReadErrors(goGitErr, gitErr)
+		}
+		return result, nil
 	}
 
 	var detection magic.Result
@@ -39,9 +50,20 @@ func InspectBlob(ctx context.Context, dir, commit, blobPath string, maxBytes int
 // reports whether the blob is binary or was truncated. It falls back to the
 // git binary when go-git cannot read the repository.
 func Blob(ctx context.Context, dir, commit, blobPath string, maxBytes int64) (content []byte, binary, truncated bool, err error) {
-	content, truncated, err = readBlob(ctx, dir, commit, blobPath, maxBytes)
+	clean, err := validateBlobRequest(ctx, commit, blobPath, maxBytes)
 	if err != nil {
 		return nil, false, false, err
+	}
+	content, truncated, goGitErr := readBlobWithGoGit(ctx, dir, commit, clean, maxBytes)
+	if goGitErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, false, false, ctxErr
+		}
+		content, binary, truncated, gitErr := clone.Blob(ctx, dir, commit, clean, maxBytes)
+		if gitErr != nil {
+			return nil, false, false, combineBlobReadErrors(goGitErr, gitErr)
+		}
+		return content, binary, truncated, nil
 	}
 	if bytes.IndexByte(content, 0) != -1 {
 		return nil, true, truncated, nil
@@ -49,40 +71,31 @@ func Blob(ctx context.Context, dir, commit, blobPath string, maxBytes int64) (co
 	return content, false, truncated, nil
 }
 
-func readBlob(ctx context.Context, dir, commit, blobPath string, maxBytes int64) ([]byte, bool, error) {
+func validateBlobRequest(ctx context.Context, commit, blobPath string, maxBytes int64) (string, error) {
 	if maxBytes < 0 {
-		return nil, false, fmt.Errorf("maxBytes must be non-negative")
+		return "", fmt.Errorf("maxBytes must be non-negative")
 	}
 	if maxBytes == math.MaxInt64 {
-		return nil, false, fmt.Errorf("maxBytes is too large")
+		return "", fmt.Errorf("maxBytes is too large")
 	}
 	if !clone.ValidCommit(commit) {
-		return nil, false, fmt.Errorf("invalid commit %q", commit)
+		return "", fmt.Errorf("invalid commit %q", commit)
 	}
 	clean, ok := clone.SanitizePath(blobPath)
 	if !ok {
-		return nil, false, fmt.Errorf("invalid path %q", blobPath)
+		return "", fmt.Errorf("invalid path %q", blobPath)
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, false, err
+		return "", err
 	}
+	return clean, nil
+}
 
-	raw, truncated, goGitErr := readBlobWithGoGit(ctx, dir, commit, clean, maxBytes)
-	if goGitErr == nil {
-		return raw, truncated, nil
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, false, ctxErr
-	}
-
-	result, gitErr := clone.InspectBlob(ctx, dir, commit, clean, maxBytes)
-	if gitErr != nil {
-		return nil, false, errors.Join(
-			fmt.Errorf("go-git blob read: %w", goGitErr),
-			fmt.Errorf("git blob read: %w", gitErr),
-		)
-	}
-	return result.Content, result.Truncated, nil
+func combineBlobReadErrors(goGitErr, gitErr error) error {
+	return errors.Join(
+		fmt.Errorf("go-git blob read: %w", goGitErr),
+		fmt.Errorf("git blob read: %w", gitErr),
+	)
 }
 
 type contextReader struct {

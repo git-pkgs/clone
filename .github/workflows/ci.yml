@@ -35,9 +35,14 @@ jobs:
       - name: Test
         run: go test -v -race ./...
 
-      - name: Test gogit module
+      - name: Test gogit module against minimum clone version
         working-directory: gogit
         run: go test -v -race ./...
+
+      - name: Test gogit module with sibling clone module
+        run: |
+          go work init . ./gogit
+          go test -v -race ./gogit/...
 
   lint:
     runs-on: ubuntu-latest
