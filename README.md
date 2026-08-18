@@ -26,6 +26,28 @@ fmt.Println(clone.Head(ctx, dst))
 
 Pass `true` as the final argument for a full clone, including when an existing shallow checkout needs to be unshallowed. Clone and fetch errors are returned as `*clone.UnreachableError`, except when the context was canceled or reached its deadline. `errors.As` retrieves the URL and underlying Git error. `ValidateURL` accepts `https://` URLs, while `ValidateRef` rejects leading hyphens, `..`, and characters outside letters, digits, `.`, `_`, `/`, and `-`.
 
+## Temporarily check out an exact tag
+
+`CheckoutTag` resolves only a local tag with the given exact name, peels an
+annotated tag to its commit, and checks it out with detached HEAD. The returned
+function restores the previous commit and reattaches its branch if that branch
+has not moved. Both operations discard tracked changes.
+
+```go
+restore, err := clone.CheckoutTag(ctx, dst, "v1.2.3")
+if err != nil {
+    log.Fatal(err)
+}
+defer func() {
+    if err := restore(context.Background()); err != nil {
+        log.Printf("restore checkout: %v", err)
+    }
+}()
+```
+
+Use `errors.Is(err, clone.ErrTagNotFound)` to distinguish an absent tag from
+an invalid tag or another local repository error. `CheckoutTag` does not fetch.
+
 ## Persistent cache
 
 `Cache` stores one checkout per URL under `Root`. `Prepare` holds a per-URL lock while updating the shallow checkout, then replaces `dst` with a copy and returns its commit. The destination must be outside `Root`.
