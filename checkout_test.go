@@ -145,11 +145,13 @@ func TestCheckoutTagRestoreRefusesMovedBranch(t *testing.T) {
 
 func TestCheckoutTagRejectsMissingAndRevisionLikeTagsWithoutMovingHead(t *testing.T) {
 	fixture := newCheckoutFixture(t)
+	runGitTest(t, fixture.dir, "tag", "nested/refs/tags/suffix-only", fixture.firstSHA)
 	for _, test := range []struct {
 		tag      string
 		notFound bool
 	}{
 		{tag: "missing", notFound: true},
+		{tag: "suffix-only", notFound: true},
 		{tag: "--ignore-skip-worktree-bits", notFound: true},
 		{tag: "v1~1"},
 	} {

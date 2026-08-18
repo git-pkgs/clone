@@ -87,30 +87,40 @@ func headBranch(ctx context.Context, dir string) (string, error) {
 }
 
 func tagCommit(ctx context.Context, dir, tag, tagRef string) (string, error) {
-	if _, err := Run(ctx, dir, nil, "show-ref", "--verify", "--quiet", tagRef); err != nil {
+	out, err := Run(ctx, dir, nil, "show-ref", "--tags", "--", tagRef)
+	if err != nil {
 		if gitExitCode(err) == 1 {
 			return "", fmt.Errorf("%w: %q", ErrTagNotFound, tag)
 		}
 		return "", fmt.Errorf("resolve tag %q: %w", tag, err)
 	}
-	object, err := Run(ctx, dir, nil, "show-ref", "--verify", "--hash", tagRef)
-	if err != nil {
-		return "", fmt.Errorf("resolve tag %q: %w", tag, err)
+	object, ok := exactShowRefObject(out, tagRef)
+	if !ok {
+		return "", fmt.Errorf("%w: %q", ErrTagNotFound, tag)
 	}
-	object = strings.TrimSpace(object)
 	if !ValidCommit(object) {
 		return "", fmt.Errorf("resolve tag %q: invalid object %q", tag, object)
 	}
 
-	out, err := Run(ctx, dir, nil, "rev-parse", "--verify", object+"^{commit}")
+	peeled, err := Run(ctx, dir, nil, "rev-parse", "--verify", object+"^{commit}")
 	if err != nil {
 		return "", fmt.Errorf("resolve tag %q commit: %w", tag, err)
 	}
-	commit := strings.TrimSpace(out)
+	commit := strings.TrimSpace(peeled)
 	if !ValidCommit(commit) {
 		return "", fmt.Errorf("resolve tag %q commit: invalid commit %q", tag, commit)
 	}
 	return commit, nil
+}
+
+func exactShowRefObject(out, ref string) (string, bool) {
+	for line := range strings.SplitSeq(out, "\n") {
+		object, foundRef, ok := strings.Cut(line, " ")
+		if ok && foundRef == ref {
+			return object, true
+		}
+	}
+	return "", false
 }
 
 func exactRefCommit(ctx context.Context, dir, ref string) (string, error) {
