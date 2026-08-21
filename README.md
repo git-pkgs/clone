@@ -26,6 +26,17 @@ fmt.Println(clone.Head(ctx, dst))
 
 Pass `true` as the final argument for a full clone, including when an existing shallow checkout needs to be unshallowed. Clone and fetch errors are returned as `*clone.UnreachableError`, except when the context was canceled or reached its deadline. `errors.As` retrieves the URL and underlying Git error. `ValidateURL` accepts `https://` URLs, while `ValidateRef` rejects leading hyphens, `..`, and characters outside letters, digits, `.`, `_`, `/`, and `-`.
 
+Use `EnsureWithOptions` to include submodules. Submodules are initialized and updated recursively with depth 1 after both a new clone and an existing checkout update. This step is best-effort because submodules may be large or refer to unavailable URLs; failures leave the parent checkout usable. Context cancellation is still returned.
+
+```go
+err := clone.EnsureWithOptions(ctx, clone.Retry{}, url, dst, "main",
+    clone.EnsureOptions{RecurseSubmodules: true},
+)
+if err != nil {
+    log.Fatal(err)
+}
+```
+
 ## Temporarily check out an exact tag
 
 `CheckoutTag` resolves only a local tag with the given exact name, peels an
@@ -50,11 +61,12 @@ an invalid tag or another local repository error. `CheckoutTag` does not fetch.
 
 ## Persistent cache
 
-`Cache` stores one checkout per URL under `Root`. `Prepare` holds a per-URL lock while updating the shallow checkout, then replaces `dst` with a copy and returns its commit. The destination must be outside `Root`.
+`Cache` stores one checkout per URL under `Root`. `Prepare` holds a per-URL lock while updating the shallow checkout, then replaces `dst` with a copy and returns its commit. The destination must be outside `Root`. Set `RecurseSubmodules` to copy best-effort shallow submodule checkouts into each destination.
 
 ```go
 cache := clone.Cache{
-    Root: "/var/cache/my-tool/repositories",
+    Root:              "/var/cache/my-tool/repositories",
+    RecurseSubmodules: true,
 }
 
 commit, err := cache.Prepare(ctx,

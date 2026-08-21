@@ -19,6 +19,11 @@ type originFixture struct {
 	featureSHA string
 }
 
+type submoduleOriginFixture struct {
+	origin       originFixture
+	submoduleDir string
+}
+
 func newOriginFixture(t *testing.T) originFixture {
 	t.Helper()
 	requireGit(t)
@@ -64,6 +69,42 @@ func newOriginFixture(t *testing.T) originFixture {
 		mainSHA:    mainSHA,
 		featureSHA: featureSHA,
 	}
+}
+
+func newSubmoduleOriginFixture(t *testing.T) submoduleOriginFixture {
+	t.Helper()
+	requireGit(t)
+
+	submoduleDir := t.TempDir()
+	runGitTest(t, submoduleDir, "init", "--quiet", "-b", "main")
+	if err := os.WriteFile(filepath.Join(submoduleDir, "vendor.c"), []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, submoduleDir, "add", "vendor.c")
+	runGitTest(t, submoduleDir, "commit", "--quiet", "-m", "first")
+
+	origin := newOriginFixture(t)
+	runGitTest(t, origin.dir, "submodule", "add", "--quiet", "file://"+submoduleDir, "vendor/library")
+	runGitTest(t, origin.dir, "commit", "--quiet", "-m", "add submodule")
+	origin.mainSHA = runGitTest(t, origin.dir, "rev-parse", "HEAD")
+
+	return submoduleOriginFixture{origin: origin, submoduleDir: submoduleDir}
+}
+
+func (f submoduleOriginFixture) update(t *testing.T, content string) {
+	t.Helper()
+
+	if err := os.WriteFile(filepath.Join(f.submoduleDir, "vendor.c"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, f.submoduleDir, "commit", "--quiet", "-am", "update submodule")
+	submoduleSHA := runGitTest(t, f.submoduleDir, "rev-parse", "HEAD")
+
+	checkout := filepath.Join(f.origin.dir, "vendor", "library")
+	runGitTest(t, checkout, "fetch", "--quiet", "origin", "main")
+	runGitTest(t, checkout, "checkout", "--quiet", submoduleSHA)
+	runGitTest(t, f.origin.dir, "add", "vendor/library")
+	runGitTest(t, f.origin.dir, "commit", "--quiet", "-m", "update submodule pointer")
 }
 
 func TestEnsureClonesFetchesRefsAndUnshallows(t *testing.T) {
@@ -118,6 +159,118 @@ func TestEnsureClonesFetchesRefsAndUnshallows(t *testing.T) {
 	}
 	if got := runGitTest(t, dst, "rev-parse", "--is-shallow-repository"); got != "false" {
 		t.Errorf("checkout shallow after full Ensure = %q, want false", got)
+	}
+}
+
+func TestEnsureWithOptionsInitializesAndUpdatesShallowSubmodules(t *testing.T) {
+	fixture := newSubmoduleOriginFixture(t)
+	dst := filepath.Join(t.TempDir(), "checkout")
+	ctx := context.Background()
+	contentPath := filepath.Join(dst, "vendor", "library", "vendor.c")
+
+	if err := Ensure(ctx, Retry{}, fixture.origin.url, dst, "", false); err != nil {
+		t.Fatalf("Ensure without submodules: %v", err)
+	}
+	if _, err := os.Stat(contentPath); !os.IsNotExist(err) {
+		t.Fatalf("submodule content exists without opt-in: %v", err)
+	}
+
+	options := EnsureOptions{RecurseSubmodules: true}
+	if err := EnsureWithOptions(ctx, Retry{}, fixture.origin.url, dst, "", options); err != nil {
+		t.Fatalf("EnsureWithOptions: %v", err)
+	}
+	content, err := os.ReadFile(contentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "first\n" {
+		t.Errorf("submodule content = %q, want first revision", content)
+	}
+	submoduleCheckout := filepath.Join(dst, "vendor", "library")
+	if got := runGitTest(t, submoduleCheckout, "rev-parse", "--is-shallow-repository"); got != "true" {
+		t.Errorf("submodule shallow = %q, want true", got)
+	}
+
+	fixture.update(t, "updated\n")
+	if err := EnsureWithOptions(ctx, Retry{}, fixture.origin.url, dst, "", options); err != nil {
+		t.Fatalf("update checkout and submodule: %v", err)
+	}
+	content, err = os.ReadFile(contentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "updated\n" {
+		t.Errorf("updated submodule content = %q, want updated revision", content)
+	}
+}
+
+func TestEnsureWithOptionsIgnoresSubmoduleFailure(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "checkout")
+	if err := os.MkdirAll(filepath.Join(dst, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var submoduleArgs []string
+	var submoduleEnv []string
+	retry := Retry{
+		Attempts: 1,
+		Run: func(_ context.Context, dir string, env []string, args ...string) (string, error) {
+			switch subcommand(args) {
+			case "fetch", "reset":
+				return "", nil
+			case "submodule":
+				if dir != dst {
+					t.Errorf("submodule dir = %q, want %q", dir, dst)
+				}
+				submoduleArgs = append([]string(nil), args...)
+				submoduleEnv = append([]string(nil), env...)
+				return "fatal: repository not found", errGitExit
+			default:
+				return "", errors.New("unexpected Git command")
+			}
+		},
+	}
+
+	options := EnsureOptions{RecurseSubmodules: true}
+	if err := EnsureWithOptions(
+		context.Background(), retry, "https://example.invalid/repo", dst, "", options,
+	); err != nil {
+		t.Fatalf("EnsureWithOptions: %v", err)
+	}
+	wantArgs := []string{"submodule", "update", "--init", "--recursive", "--depth", "1"}
+	if !slices.Equal(submoduleArgs, wantArgs) {
+		t.Errorf("submodule args = %v, want %v", submoduleArgs, wantArgs)
+	}
+	if !slices.Contains(submoduleEnv, "GIT_PROTOCOL_FROM_USER=0") {
+		t.Errorf("submodule env = %v", submoduleEnv)
+	}
+}
+
+func TestEnsureWithOptionsReturnsSubmoduleCancellation(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "checkout")
+	if err := os.MkdirAll(filepath.Join(dst, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	retry := Retry{
+		Attempts: 1,
+		Run: func(_ context.Context, _ string, _ []string, args ...string) (string, error) {
+			if subcommand(args) == "submodule" {
+				cancel()
+				return "submodule canceled", errGitExit
+			}
+			return "", nil
+		},
+	}
+	options := EnsureOptions{RecurseSubmodules: true}
+	err := EnsureWithOptions(ctx, retry, "https://example.invalid/repo", dst, "", options)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	var unreachable *UnreachableError
+	if errors.As(err, &unreachable) {
+		t.Fatalf("cancellation wrapped as UnreachableError: %v", err)
 	}
 }
 
