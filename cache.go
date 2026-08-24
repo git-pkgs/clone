@@ -14,9 +14,10 @@ import (
 // Cache keeps one persistent checkout per repository URL. A Cache must not be
 // copied after its first use.
 type Cache struct {
-	Root  string // Parent directory for per-URL checkouts.
-	Retry Retry  // Retry policy for clone and fetch operations.
-	mu    sync.Map
+	Root              string // Parent directory for per-URL checkouts.
+	Retry             Retry  // Retry policy for clone and fetch operations.
+	RecurseSubmodules bool   // Best-effort inclusion of nested shallow submodules.
+	mu                sync.Map
 }
 
 // Dir returns the persistent directory for url under c.Root.
@@ -44,7 +45,8 @@ func (c *Cache) Prepare(ctx context.Context, url, ref, dst string) (string, erro
 		return "", err
 	}
 	cacheSrc := filepath.Join(cacheDir, "src")
-	if err := Ensure(ctx, c.Retry, url, cacheSrc, ref, false); err != nil {
+	options := EnsureOptions{RecurseSubmodules: c.RecurseSubmodules}
+	if err := EnsureWithOptions(ctx, c.Retry, url, cacheSrc, ref, options); err != nil {
 		return "", err
 	}
 	commit := Head(ctx, cacheSrc)

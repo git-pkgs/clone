@@ -76,6 +76,23 @@ func TestCachePrepareUpdatesAndReplacesDestination(t *testing.T) {
 	}
 }
 
+func TestCachePrepareIncludesSubmodules(t *testing.T) {
+	fixture := newSubmoduleOriginFixture(t)
+	cache := Cache{Root: t.TempDir(), RecurseSubmodules: true}
+	dst := filepath.Join(t.TempDir(), "workspace", "src")
+
+	if _, err := cache.Prepare(context.Background(), fixture.origin.url, "", dst); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(dst, "vendor", "library", "vendor.c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "first\n" {
+		t.Errorf("submodule content = %q, want first revision", content)
+	}
+}
+
 func TestCachePrepareRejectsDestinationOverlappingCache(t *testing.T) {
 	rootParent := t.TempDir()
 	cache := Cache{Root: filepath.Join(rootParent, "cache")}

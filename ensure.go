@@ -25,12 +25,26 @@ func (e *UnreachableError) Unwrap() error {
 	return e.Err
 }
 
+// EnsureOptions configures an EnsureWithOptions operation.
+type EnsureOptions struct {
+	Full              bool // Clone full history and unshallow an existing checkout.
+	RecurseSubmodules bool // Initialize and update submodules recursively at depth 1.
+}
+
 // Ensure clones url into dst on its first call, then fetches and resets the
 // checkout on later calls. A shallow clone is used unless full is true. An
 // existing shallow clone is unshallowed when full changes to true. ref may
 // be a branch, tag, commit ID, or empty for the remote's default branch.
 func Ensure(ctx context.Context, retry Retry, url, dst, ref string, full bool) error {
-	err := ensure(ctx, retry, url, dst, ref, full)
+	return EnsureWithOptions(ctx, retry, url, dst, ref, EnsureOptions{Full: full})
+}
+
+// EnsureWithOptions clones or updates a checkout like Ensure. When
+// RecurseSubmodules is enabled, it also makes a best-effort attempt to
+// initialize and update nested submodules with depth 1. A submodule failure
+// does not fail the checkout, but context cancellation still does.
+func EnsureWithOptions(ctx context.Context, retry Retry, url, dst, ref string, options EnsureOptions) error {
+	err := ensure(ctx, retry, url, dst, ref, options)
 	if err == nil {
 		return nil
 	}
@@ -40,7 +54,7 @@ func Ensure(ctx context.Context, retry Retry, url, dst, ref string, full bool) e
 	return &UnreachableError{URL: url, Err: err}
 }
 
-func ensure(ctx context.Context, retry Retry, url, dst, ref string, full bool) error {
+func ensure(ctx context.Context, retry Retry, url, dst, ref string, options EnsureOptions) error {
 	if err := ValidateURL(url); err != nil {
 		return err
 	}
@@ -48,7 +62,10 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, full bool) e
 		return err
 	}
 	if _, err := os.Stat(filepath.Join(dst, ".git")); err == nil {
-		return fetchRef(ctx, retry, url, dst, ref, full)
+		if err := fetchRef(ctx, retry, url, dst, ref, options.Full); err != nil {
+			return err
+		}
+		return updateSubmodules(ctx, retry, dst, options.RecurseSubmodules)
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), dirPerm); err != nil {
 		return err
@@ -60,7 +77,7 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, full bool) e
 	// repositories unreachable for callers that authenticate via stored git
 	// credentials rather than embedding a token in the URL.
 	args := []string{"clone", "--quiet"} //nolint:goconst // Git argv is clearer with literal subcommands and flags.
-	if !full {
+	if !options.Full {
 		args = append(args, "--depth", "1")
 	}
 	args = append(args, "--", url, dst)
@@ -74,7 +91,26 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, full bool) e
 		return fmt.Errorf("%s: %w", strings.TrimSpace(out), err)
 	}
 	if ref != "" {
-		return fetchRef(ctx, retry, url, dst, ref, full)
+		if err := fetchRef(ctx, retry, url, dst, ref, options.Full); err != nil {
+			return err
+		}
+	}
+	return updateSubmodules(ctx, retry, dst, options.RecurseSubmodules)
+}
+
+func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool) error {
+	if !enabled {
+		return nil
+	}
+	if _, err := retry.Do(ctx, Command{
+		Label: "submodule",
+		Dir:   dst,
+		Env:   remoteEnv(),
+		Args:  []string{"submodule", "update", "--init", "--recursive", "--depth", "1"},
+	}); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 	}
 	return nil
 }
