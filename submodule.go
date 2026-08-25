@@ -213,9 +213,6 @@ func submoduleURL(ctx context.Context, dir string, definition submoduleDefinitio
 	if parseErr == nil && parsed.IsAbs() {
 		return definition.url, nil
 	}
-	if err != nil {
-		return "", err
-	}
 	if parseErr != nil {
 		return "", parseErr
 	}

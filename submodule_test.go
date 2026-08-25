@@ -246,6 +246,8 @@ func TestSubmodulesReportsUnavailableWithoutCredentials(t *testing.T) {
 }
 
 func TestSubmodulesReturnsEmptyForCheckoutWithoutSubmodules(t *testing.T) {
+	requireGit(t)
+
 	repository := newTestRepository(t, "file.txt")
 	modules, err := Submodules(context.Background(), repository.dir)
 	if err != nil {
@@ -253,5 +255,19 @@ func TestSubmodulesReturnsEmptyForCheckoutWithoutSubmodules(t *testing.T) {
 	}
 	if len(modules) != 0 {
 		t.Fatalf("Submodules() = %#v, want none", modules)
+	}
+}
+
+func TestSubmoduleURLReturnsStableErrorForUninitializedRelativeURL(t *testing.T) {
+	requireGit(t)
+
+	repository := newTestRepository(t, "file.txt")
+	definition := submoduleDefinition{
+		configKey: "submodule.missing",
+		url:       "../missing.git",
+	}
+	_, err := submoduleURL(context.Background(), repository.dir, definition)
+	if err == nil || err.Error() != "relative repository URL is unresolved" {
+		t.Fatalf("error = %v, want stable unresolved-relative-URL error", err)
 	}
 }
