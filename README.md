@@ -81,6 +81,18 @@ if err != nil {
 fmt.Println(commit, cache.DiskBytes("https://github.com/git-pkgs/clone"))
 ```
 
+Call `Submodules` on the prepared checkout to read pinned identities without changing `Prepare`'s return values. Declared submodules that could not be fetched are included with `Initialized` set to false, `Status` set to `SubmoduleStatusUnavailable`, and a credential-free error string.
+
+```go
+submodules, err := clone.Submodules(ctx, "/tmp/job/src")
+if err != nil {
+    log.Fatal(err)
+}
+for _, submodule := range submodules {
+    fmt.Println(submodule.Path, submodule.PURL, submodule.Status)
+}
+```
+
 When a historical commit is missing from the shallow cache, `EnsureCommit` unshallows the checkout:
 
 ```go

@@ -210,8 +210,10 @@ func TestEnsureWithOptionsIgnoresSubmoduleFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var submoduleArgs []string
-	var submoduleEnv []string
+	var syncArgs []string
+	var syncEnv []string
+	var updateArgs []string
+	var updateEnv []string
 	retry := Retry{
 		Attempts: 1,
 		Run: func(_ context.Context, dir string, env []string, args ...string) (string, error) {
@@ -222,8 +224,13 @@ func TestEnsureWithOptionsIgnoresSubmoduleFailure(t *testing.T) {
 				if dir != dst {
 					t.Errorf("submodule dir = %q, want %q", dir, dst)
 				}
-				submoduleArgs = append([]string(nil), args...)
-				submoduleEnv = append([]string(nil), env...)
+				if slices.Contains(args, "sync") {
+					syncArgs = append([]string(nil), args...)
+					syncEnv = append([]string(nil), env...)
+					return "", nil
+				}
+				updateArgs = append([]string(nil), args...)
+				updateEnv = append([]string(nil), env...)
 				return "fatal: repository not found", errGitExit
 			default:
 				return "", errors.New("unexpected Git command")
@@ -237,12 +244,18 @@ func TestEnsureWithOptionsIgnoresSubmoduleFailure(t *testing.T) {
 	); err != nil {
 		t.Fatalf("EnsureWithOptions: %v", err)
 	}
-	wantArgs := []string{"submodule", "update", "--init", "--recursive", "--depth", "1"}
-	if !slices.Equal(submoduleArgs, wantArgs) {
-		t.Errorf("submodule args = %v, want %v", submoduleArgs, wantArgs)
+	wantSyncArgs := []string{"submodule", "sync", "--recursive"}
+	if !slices.Equal(syncArgs, wantSyncArgs) {
+		t.Errorf("submodule sync args = %v, want %v", syncArgs, wantSyncArgs)
 	}
-	if !slices.Contains(submoduleEnv, "GIT_PROTOCOL_FROM_USER=0") {
-		t.Errorf("submodule env = %v", submoduleEnv)
+	wantUpdateArgs := []string{"submodule", "update", "--init", "--recursive", "--depth", "1"}
+	if !slices.Equal(updateArgs, wantUpdateArgs) {
+		t.Errorf("submodule update args = %v, want %v", updateArgs, wantUpdateArgs)
+	}
+	for name, env := range map[string][]string{"sync": syncEnv, "update": updateEnv} {
+		if !slices.Contains(env, "GIT_PROTOCOL_FROM_USER=0") {
+			t.Errorf("submodule %s env = %v", name, env)
+		}
 	}
 }
 
