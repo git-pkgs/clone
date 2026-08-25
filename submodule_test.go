@@ -122,6 +122,65 @@ func TestSubmodulesReportsInitializedNestedIdentities(t *testing.T) {
 	}
 }
 
+func TestCachePrepareSyncsChangedSubmoduleURL(t *testing.T) {
+	requireGit(t)
+
+	first := newTestRepository(t, "first.txt")
+	second := newTestRepository(t, "second.txt")
+	parent := newTestRepository(t, "parent.txt")
+	const (
+		parentURL = "https://clone.test/retargeted.git"
+		firstURL  = "https://github.com/example/first.git"
+		secondURL = "https://github.com/example/second.git"
+	)
+	configureTestURLs(t, map[string]string{
+		parentURL: parent.dir,
+		firstURL:  first.dir,
+		secondURL: second.dir,
+	})
+
+	runGitTest(t, parent.dir, "submodule", "add", "--quiet", "--name", "dependency", firstURL, "deps/library")
+	runGitTest(t, parent.dir, "commit", "--quiet", "-am", "add submodule")
+
+	cache := Cache{Root: t.TempDir(), RecurseSubmodules: true}
+	dst := filepath.Join(t.TempDir(), "workspace", "src")
+	if _, err := cache.Prepare(context.Background(), parentURL, "", dst); err != nil {
+		t.Fatalf("first Prepare: %v", err)
+	}
+
+	runGitTest(t, parent.dir, "config", "--file", ".gitmodules", "submodule.dependency.url", secondURL)
+	runGitTest(t, parent.dir, "add", ".gitmodules")
+	runGitTest(t, parent.dir, "update-index", "--cacheinfo", "160000,"+second.commit+",deps/library")
+	runGitTest(t, parent.dir, "commit", "--quiet", "-m", "retarget submodule")
+
+	if _, err := cache.Prepare(context.Background(), parentURL, "", dst); err != nil {
+		t.Fatalf("second Prepare: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(dst, "deps", "library", "second.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "second.txt\n" {
+		t.Errorf("submodule content = %q", content)
+	}
+
+	modules, err := Submodules(context.Background(), dst)
+	if err != nil {
+		t.Fatalf("Submodules: %v", err)
+	}
+	want := []Submodule{{
+		Path:        "deps/library",
+		URL:         secondURL,
+		Commit:      second.commit,
+		PURL:        "pkg:github/example/second@" + second.commit,
+		Initialized: true,
+		Status:      SubmoduleStatusInitialized,
+	}}
+	if !reflect.DeepEqual(modules, want) {
+		t.Fatalf("Submodules() = %#v, want %#v", modules, want)
+	}
+}
+
 func TestSubmodulesReportsUnavailableWithoutCredentials(t *testing.T) {
 	requireGit(t)
 

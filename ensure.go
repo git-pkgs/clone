@@ -102,7 +102,13 @@ func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool
 	if !enabled {
 		return nil
 	}
-	if _, err := retry.Do(ctx, Command{
+	policy := retry.Resolved()
+	if _, err := policy.Run(ctx, dst, remoteEnv(), "submodule", "sync", "--recursive"); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+	}
+	if _, err := policy.Do(ctx, Command{
 		Label: "submodule",
 		Dir:   dst,
 		Env:   remoteEnv(),
@@ -124,7 +130,7 @@ func fetchRef(ctx context.Context, retry Retry, url, dst, ref string, full bool)
 	if target == "" {
 		target = "HEAD" //nolint:goconst // Git's default ref is clearest by its literal name.
 	}
-	args := []string{"-C", dst, "fetch", "--quiet"} //nolint:goconst // Git argv is clearer with literal subcommands and flags.
+	args := []string{"-C", dst, "fetch", "--quiet", "--no-recurse-submodules"} //nolint:goconst // Git argv is clearer with literal subcommands and flags.
 	if full {
 		out, _ := policy.Run(ctx, "", nil, "-C", dst, "rev-parse", "--is-shallow-repository")
 		if strings.TrimSpace(out) == "true" {
@@ -140,7 +146,9 @@ func fetchRef(ctx context.Context, retry Retry, url, dst, ref string, full bool)
 	if err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(out), err)
 	}
-	out, err = policy.Run(ctx, "", nil, "-C", dst, "reset", "--quiet", "--hard", "FETCH_HEAD")
+	out, err = policy.Run(ctx, "", nil,
+		"-C", dst, "reset", "--quiet", "--hard", "--no-recurse-submodules", "FETCH_HEAD",
+	)
 	if err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(out), err)
 	}
