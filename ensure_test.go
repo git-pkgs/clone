@@ -351,7 +351,7 @@ func TestEnsureRetriesCloneAndResetsPartialDestination(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dst, "partial"), []byte("partial"), 0o644); err != nil {
 					return "", err
 				}
-				return "fatal: Connection reset by peer", errGitExit
+				return "fatal: expected flush after ref listing", errGitExit
 			}
 			return "", nil
 		},

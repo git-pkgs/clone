@@ -211,6 +211,7 @@ var transientFailures = []string{
 	"network is unreachable",
 	"no route to host",
 	"the remote end hung up unexpectedly",
+	"expected flush after ref listing",
 	"early eof",
 	"rpc failed",
 	"unexpected disconnect while reading sideband packet",

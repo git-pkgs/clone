@@ -205,6 +205,7 @@ func TestTransientFailure(t *testing.T) {
 		"fatal: unable to access remote: Could not resolve host: example.invalid",
 		"fatal: unable to access remote: Connection refused",
 		"fatal: the remote end hung up unexpectedly",
+		"fatal: expected flush after ref listing",
 		"error: RPC failed; HTTP 503 curl 22 Service Temporarily Unavailable",
 		"fatal: unable to access remote: The requested URL returned error: 429",
 		"fatal: unable to access remote: The requested URL returned error: 524",
