@@ -1,15 +1,15 @@
 module github.com/git-pkgs/clone
 
-go 1.26
+go 1.26.0
 
 toolchain go1.26.7
 
 require (
 	github.com/git-pkgs/magic v0.2.0
-	github.com/git-pkgs/purl v0.1.17
+	github.com/git-pkgs/purl v0.1.19
 )
 
 require (
-	github.com/git-pkgs/vers v0.3.1 // indirect
-	github.com/package-url/packageurl-go v0.1.6 // indirect
+	github.com/git-pkgs/vers v0.6.0 // indirect
+	github.com/package-url/packageurl-go v0.1.7 // indirect
 )
