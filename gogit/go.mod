@@ -1,10 +1,10 @@
 module github.com/git-pkgs/clone/gogit
 
-go 1.25.6
+go 1.26
 
 require (
 	github.com/git-pkgs/clone v0.2.1 // minimum compatible version
-	github.com/git-pkgs/magic v0.2.0
+	github.com/git-pkgs/magic v0.3.1
 	github.com/go-git/go-billy/v5 v5.9.1
 	github.com/go-git/go-git/v5 v5.19.2
 )
