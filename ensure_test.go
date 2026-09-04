@@ -379,6 +379,29 @@ func TestEnsureRetriesCloneAndResetsPartialDestination(t *testing.T) {
 	}
 }
 
+func TestEnsureConfiguresLongPathsForCloneAndFetch(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "checkout")
+	commands := make(map[string][]string)
+	retry := Retry{
+		Run: func(_ context.Context, _ string, _ []string, args ...string) (string, error) {
+			commands[subcommand(args)] = append([]string(nil), args...)
+			return "", nil
+		},
+	}
+
+	err := Ensure(context.Background(), retry, "https://example.invalid/repo", dst, "main", false)
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	for _, command := range []string{"clone", "fetch"} {
+		args := commands[command]
+		want := []string{"-c", "core.longpaths=true"}
+		if len(args) < len(want) || !slices.Equal(args[:len(want)], want) {
+			t.Errorf("%s args = %v, want prefix %v", command, args, want)
+		}
+	}
+}
+
 func TestEnsureUnknownRefReturnsUnreachableError(t *testing.T) {
 	origin := newOriginFixture(t)
 	dst := filepath.Join(t.TempDir(), "checkout")

@@ -28,6 +28,10 @@ func remoteEnv() []string {
 	return env
 }
 
+func longPathArgs(args ...string) []string {
+	return append([]string{"-c", "core.longpaths=true"}, args...)
+}
+
 // Runner runs one Git invocation and returns its combined output.
 type Runner func(ctx context.Context, dir string, env []string, args ...string) (string, error)
 
