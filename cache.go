@@ -83,8 +83,8 @@ func (c *Cache) EnsureCommit(ctx context.Context, url, commit string) error {
 		return nil
 	}
 	out, err := doPinnedURL(ctx, policy, url, Command{
-		Args:  []string{"fetch", "--unshallow", "--quiet", "origin"}, //nolint:goconst // Git argv is clearer with literal subcommands and flags.
-		Label: "fetch",                                               //nolint:goconst // Retry notices use the literal Git subcommand.
+		Args:  longPathArgs("fetch", "--unshallow", "--quiet", "origin"), //nolint:goconst // Git argv is clearer with literal subcommands and flags.
+		Label: "fetch",                                                   //nolint:goconst // Retry notices use the literal Git subcommand.
 		Dir:   cacheSrc,
 		Env:   remoteEnv(),
 	})

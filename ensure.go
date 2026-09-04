@@ -84,7 +84,7 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, options Ensu
 	out, err := doPinnedURL(ctx, retry, url, Command{
 		Label: "clone",
 		Env:   remoteEnv(),
-		Args:  args,
+		Args:  longPathArgs(args...),
 		Reset: DestReset(dst),
 	})
 	if err != nil {
@@ -141,7 +141,7 @@ func fetchRef(ctx context.Context, retry Retry, url, dst, ref string, full bool)
 	out, err := doPinnedURL(ctx, policy, url, Command{
 		Label: "fetch", //nolint:goconst // Retry notices use the literal Git subcommand.
 		Env:   remoteEnv(),
-		Args:  args,
+		Args:  longPathArgs(args...),
 	})
 	if err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(out), err)

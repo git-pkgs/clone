@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -188,6 +189,40 @@ func TestCacheEnsureCommitRetriesUnshallowFetch(t *testing.T) {
 	}
 	if fetchCalls != 2 {
 		t.Errorf("fetch calls = %d, want 2", fetchCalls)
+	}
+}
+
+func TestCacheEnsureCommitConfiguresLongPathsForFetch(t *testing.T) {
+	cache := Cache{Root: t.TempDir()}
+	url := "https://example.invalid/repo"
+	cacheSrc := filepath.Join(cache.Dir(url), "src")
+	if err := os.MkdirAll(filepath.Join(cacheSrc, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var fetchArgs []string
+	cache.Retry = Retry{
+		Run: func(_ context.Context, _ string, _ []string, args ...string) (string, error) {
+			switch subcommand(args) {
+			case "cat-file":
+				return "", errors.New("missing object")
+			case "rev-parse":
+				return "true\n", nil
+			case "fetch":
+				fetchArgs = append([]string(nil), args...)
+				return "", nil
+			default:
+				return "", errors.New("unexpected Git command")
+			}
+		},
+	}
+
+	if err := cache.EnsureCommit(context.Background(), url, "deadbeef"); err != nil {
+		t.Fatalf("EnsureCommit: %v", err)
+	}
+	want := []string{"-c", "core.longpaths=true"}
+	if len(fetchArgs) < len(want) || !slices.Equal(fetchArgs[:len(want)], want) {
+		t.Errorf("fetch args = %v, want prefix %v", fetchArgs, want)
 	}
 }
 
