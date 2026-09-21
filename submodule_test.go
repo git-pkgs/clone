@@ -236,12 +236,49 @@ func TestSubmodulesReportsUnavailableWithoutCredentials(t *testing.T) {
 	if module.PURL != wantPURL {
 		t.Error("PURL is not the expected credential-free identity")
 	}
-	if module.Initialized || module.Status != SubmoduleStatusUnavailable || module.Error == "" {
-		t.Error("unavailable submodule status is incomplete")
+	if module.Initialized || module.Status != SubmoduleStatusUnavailable || module.Error != "submodule checkout is unavailable" {
+		t.Errorf("unavailable submodule status is incomplete: %+v", module)
 	}
 	metadata := fmt.Sprintf("%+v", modules)
 	if strings.Contains(metadata, username) || strings.Contains(metadata, secret) {
 		t.Fatal("submodule metadata contains credential")
+	}
+}
+
+func TestSubmodulesReportsDriftedCheckoutMismatch(t *testing.T) {
+	requireGit(t)
+
+	library := newTestRepository(t, "library.txt")
+	parent := newTestRepository(t, "parent.txt")
+	const (
+		parentURL  = "https://clone.test/drifted.git"
+		libraryURL = "https://github.com/example/library.git"
+	)
+	configureTestURLs(t, map[string]string{parentURL: parent.dir, libraryURL: library.dir})
+
+	runGitTest(t, parent.dir, "submodule", "add", "--quiet", "--name", "library", libraryURL, "deps/library")
+	runGitTest(t, parent.dir, "commit", "--quiet", "-am", "add submodule")
+
+	cache := Cache{Root: t.TempDir(), RecurseSubmodules: true}
+	dst := filepath.Join(t.TempDir(), "workspace", "src")
+	if _, err := cache.Prepare(context.Background(), parentURL, "", dst); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	checkout := filepath.Join(dst, "deps", "library")
+	runGitTest(t, checkout, "commit", "--quiet", "--allow-empty", "-m", "drift")
+	drifted := runGitTest(t, checkout, "rev-parse", "HEAD")
+
+	modules, err := Submodules(context.Background(), dst)
+	if err != nil {
+		t.Fatalf("Submodules: %v", err)
+	}
+	if len(modules) != 1 {
+		t.Fatalf("len(Submodules()) = %d, want 1", len(modules))
+	}
+	module := modules[0]
+	wantError := fmt.Sprintf("checked out commit %s does not match gitlink %s", drifted, library.commit)
+	if module.Initialized || module.Status != SubmoduleStatusUnavailable || module.Error != wantError {
+		t.Errorf("drifted submodule = %+v, want error %q", module, wantError)
 	}
 }
 

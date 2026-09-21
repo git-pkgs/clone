@@ -237,7 +237,14 @@ func gitlinkCommit(ctx context.Context, dir, submodulePath string) (string, erro
 }
 
 func submoduleHead(ctx context.Context, dir string) (string, error) {
-	out, err := Run(ctx, dir, nil, "rev-parse", "HEAD")
+	// An uninitialized submodule is an empty directory inside the parent
+	// checkout; without a ceiling, repository discovery walks up and reads
+	// the parent's HEAD as the submodule's.
+	ceiling, err := filepath.Abs(filepath.Dir(dir))
+	if err != nil {
+		return "", err
+	}
+	out, err := Run(ctx, dir, []string{"GIT_CEILING_DIRECTORIES=" + ceiling}, "rev-parse", "HEAD")
 	if err != nil {
 		return "", err
 	}
