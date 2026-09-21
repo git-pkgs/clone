@@ -281,8 +281,7 @@ func TestEnsureWithOptionsReturnsSubmoduleCancellation(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
-	var unreachable *UnreachableError
-	if errors.As(err, &unreachable) {
+	if _, ok := errors.AsType[*UnreachableError](err); ok {
 		t.Fatalf("cancellation wrapped as UnreachableError: %v", err)
 	}
 }
@@ -306,8 +305,7 @@ func TestEnsureRejectsInputBeforeRunningGit(t *testing.T) {
 		if err == nil {
 			t.Fatalf("Ensure(%q, %q) succeeded", test.url, test.ref)
 		}
-		var unreachable *UnreachableError
-		if !errors.As(err, &unreachable) {
+		if _, ok := errors.AsType[*UnreachableError](err); !ok {
 			t.Fatalf("error %T = %v, want *UnreachableError", err, err)
 		}
 		if calls != 0 {
@@ -328,8 +326,7 @@ func TestEnsureReturnsContextErrorDirectly(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}
-	var unreachable *UnreachableError
-	if errors.As(err, &unreachable) {
+	if _, ok := errors.AsType[*UnreachableError](err); ok {
 		t.Fatalf("cancellation wrapped as UnreachableError: %v", err)
 	}
 }
