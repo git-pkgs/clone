@@ -34,20 +34,22 @@ func TestRemoteEnv(t *testing.T) {
 func TestRunUsesDirectoryAndEnvironment(t *testing.T) {
 	requireGit(t)
 	dir := t.TempDir()
+	// A marker file read relative to the working directory proves dir is
+	// used without comparing path spellings, which differ under git's
+	// MSYS shell on Windows.
+	if err := os.WriteFile(filepath.Join(dir, "marker"), []byte("in-dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	out, err := Run(context.Background(), dir, []string{"CLONE_RUN_TEST=value"},
-		"-c", "alias.test=!pwd && printf \"|%s\" \"$CLONE_RUN_TEST\"", "test")
+		"-c", "alias.test=!cat marker && printf \"|%s\" \"$CLONE_RUN_TEST\"", "test")
 	if err != nil {
 		t.Fatalf("Run: %s: %v", out, err)
 	}
 	parts := strings.Split(strings.TrimSpace(out), "|")
-	resolvedDir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if len(parts) != 2 ||
-		strings.TrimSpace(parts[0]) != resolvedDir ||
+		strings.TrimSpace(parts[0]) != "in-dir" ||
 		strings.TrimSpace(parts[1]) != "value" {
-		t.Fatalf("Run output = %q, want %q and environment value", out, dir)
+		t.Fatalf("Run output = %q, want marker content and environment value", out)
 	}
 }
 

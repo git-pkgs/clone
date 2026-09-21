@@ -7,6 +7,22 @@ import (
 	"testing"
 )
 
+// The library runs git with the ambient environment, so system and global
+// config (core.autocrlf=true on Windows runners) leaks into checkouts made
+// by the code under test. Isolate the whole test process, not just the
+// fixture helpers.
+func TestMain(m *testing.M) {
+	for key, value := range map[string]string{
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_CONFIG_GLOBAL":   os.DevNull,
+	} {
+		if err := os.Setenv(key, value); err != nil {
+			panic(err)
+		}
+	}
+	os.Exit(m.Run())
+}
+
 func requireGit(t testing.TB) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
