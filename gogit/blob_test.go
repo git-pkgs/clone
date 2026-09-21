@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -280,7 +281,9 @@ func TestBlobPreservesGoGitAndGitErrors(t *testing.T) {
 	if !errors.Is(err, exec.ErrNotFound) {
 		t.Errorf("error = %v, want exec.ErrNotFound", err)
 	}
-	if err == nil || !strings.Contains(err.Error(), dir) {
+	// The go-git error renders the path with %q, so match the quoted
+	// form; on Windows the escaping doubles the backslashes.
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%q", dir)) {
 		t.Errorf("error = %v, want starting path %q", err, dir)
 	}
 }
