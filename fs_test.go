@@ -3,6 +3,7 @@ package clone
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -35,7 +36,7 @@ func TestCopyTreeCopiesFilesDirectoriesAndSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Errorf("file mode = %o, want 600", info.Mode().Perm())
 	}
 	link, err := os.Readlink(filepath.Join(dst, "link"))
