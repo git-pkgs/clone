@@ -103,7 +103,7 @@ func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool
 		return nil
 	}
 	policy := retry.Resolved()
-	if _, err := policy.Run(ctx, dst, remoteEnv(), "submodule", "sync", "--recursive"); err != nil {
+	if _, err := policy.Run(ctx, dst, remoteEnv(), longPathArgs("submodule", "sync", "--recursive")...); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
@@ -112,7 +112,7 @@ func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool
 		Label: "submodule",
 		Dir:   dst,
 		Env:   remoteEnv(),
-		Args:  []string{"submodule", "update", "--init", "--recursive", "--depth", "1"},
+		Args:  longPathArgs("submodule", "update", "--init", "--recursive", "--depth", "1"),
 	}); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -147,7 +147,7 @@ func fetchRef(ctx context.Context, retry Retry, url, dst, ref string, full bool)
 		return fmt.Errorf("%s: %w", strings.TrimSpace(out), err)
 	}
 	out, err = policy.Run(ctx, "", nil,
-		"-C", dst, "reset", "--quiet", "--hard", "--no-recurse-submodules", "FETCH_HEAD",
+		longPathArgs("-C", dst, "reset", "--quiet", "--hard", "--no-recurse-submodules", "FETCH_HEAD")...,
 	)
 	if err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(out), err)
