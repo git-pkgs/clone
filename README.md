@@ -180,4 +180,4 @@ out, err := retry.Do(ctx, clone.Command{
 
 ## License
 
-MIT
+[MIT](LICENSE).
