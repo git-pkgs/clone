@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.26.7
 
 require (
-	github.com/git-pkgs/magic v0.3.1
+	github.com/git-pkgs/magic v0.4.0
 	github.com/git-pkgs/purl v0.1.20
 )
 
