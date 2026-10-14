@@ -1,5 +1,5 @@
-github.com/git-pkgs/magic v0.4.0 h1:oag0YiKuWOIIKWTKEjS47HYydGawUlfQiU96TwAqFyM=
-github.com/git-pkgs/magic v0.4.0/go.mod h1:SXOqcsNmbmpZjJZHEEWnwxprbsFvpwWgTAZrgXp4Jm4=
+github.com/git-pkgs/magic v0.5.0 h1:Pm+4fkHR+K6kg9pwJM4hnwWUuBlkYdLmF1yIAI8lU9Q=
+github.com/git-pkgs/magic v0.5.0/go.mod h1:SXOqcsNmbmpZjJZHEEWnwxprbsFvpwWgTAZrgXp4Jm4=
 github.com/git-pkgs/purl v0.1.21 h1:PDZUX43lxIiXPn2eHcsNiiiwQo+HajntZ/4TwSvCGlw=
 github.com/git-pkgs/purl v0.1.21/go.mod h1:4dOmris48ehjiKmWBqSmMHguUQht48BLeXW+hQUnuj0=
 github.com/git-pkgs/vers v0.7.1 h1:23VceCbOjQKib0jhbfNRqL3YqkBPiUwdkQNhJoZgnsU=
