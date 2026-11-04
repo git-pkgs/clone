@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -20,9 +21,6 @@ func TestCopyTreeCopiesFilesDirectoriesAndSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(filepath.Join("nested", "file.txt"), filepath.Join(src, "link")); err != nil {
-		if runtime.GOOS == "windows" {
-			t.Skipf("creating a symlink needs privileges on windows: %v", err)
-		}
 		t.Fatal(err)
 	}
 
@@ -60,23 +58,27 @@ func TestCopyTreeReturnsSourceError(t *testing.T) {
 	}
 }
 
-// src or dst containing the other would make the walk discover its own
-// output, so both directions are refused before anything is read.
 func TestCopyTreeRefusesOverlap(t *testing.T) {
 	src := t.TempDir()
 	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("content"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := CopyTree(ctx, src, filepath.Join(src, "nested", "out")); err == nil {
-		t.Fatal("CopyTree succeeded with dst inside src")
+	if err := CopyTree(ctx, src, filepath.Join(src, "nested", "out")); err == nil || !strings.Contains(err.Error(), "overlap") {
+		t.Fatalf("CopyTree error = %v, want an overlap refusal for dst inside src", err)
 	}
-	if err := CopyTree(ctx, filepath.Join(t.TempDir(), "in"), t.TempDir()); err == nil {
-		t.Fatal("CopyTree succeeded with src inside dst")
+
+	base := t.TempDir()
+	dst := filepath.Join(base, "out")
+	inside := filepath.Join(dst, "in")
+	if err := os.MkdirAll(inside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := CopyTree(ctx, inside, dst); err == nil || !strings.Contains(err.Error(), "overlap") {
+		t.Fatalf("CopyTree error = %v, want an overlap refusal for src inside dst", err)
 	}
 }
 
-// A cancelled context stops the walk at the next entry.
 func TestCopyTreeHonoursContext(t *testing.T) {
 	src := t.TempDir()
 	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("content"), 0o600); err != nil {

@@ -2,6 +2,7 @@ package clone
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,14 +13,8 @@ import (
 
 // CopyTree recursively copies src to dst, preserving permissions but not
 // ownership or timestamps. Symlinks are recreated with their original target.
-//
-// The source is read through os.OpenRoot, so a file swapped for a symlink
-// between listing and opening is refused at open time instead of reading
-// bytes from outside the tree. Entries that are neither directories,
-// symlinks nor regular files are refused: a FIFO would block on open and a
-// device node would copy without bound. A cancelled context stops the walk
-// at the next entry. src and dst may not contain one another, which would
-// make the walk discover its own output.
+// Entries that are neither directories, symlinks nor regular files are refused,
+// and src and dst may not contain one another.
 func CopyTree(ctx context.Context, src, dst string) error {
 	if containsPath(src, dst) || containsPath(dst, src) {
 		return fmt.Errorf("copy source and destination overlap: %q and %q", src, dst)
@@ -36,54 +31,79 @@ func CopyTree(ctx context.Context, src, dst string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
 		target := filepath.Join(dst, filepath.FromSlash(name))
 		switch {
-		case info.IsDir():
+		case d.IsDir():
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
 			return os.MkdirAll(target, info.Mode().Perm())
-		case info.Mode()&os.ModeSymlink != 0:
+		case d.Type()&fs.ModeSymlink != 0:
 			link, err := root.Readlink(name)
 			if err != nil {
 				return err
 			}
 			return os.Symlink(link, target)
-		case info.Mode().IsRegular():
-			return copyFromRoot(root, name, target, info.Mode().Perm())
 		default:
-			return fmt.Errorf("refuse %s: not a regular file", name)
+			return copyFromRoot(root, name, target)
 		}
 	})
 }
 
-// containsPath reports whether child is parent or lies under it, comparing
-// cleaned absolute paths without resolving symlinks.
+// containsPath reports whether child is parent or lies under it, resolving
+// symlinks in both so a link into the other tree still counts as overlap.
 func containsPath(parent, child string) bool {
-	absParent, err := filepath.Abs(parent)
-	if err != nil {
-		return false
-	}
-	absChild, err := filepath.Abs(child)
-	if err != nil {
-		return false
-	}
-	rel, err := filepath.Rel(absParent, absChild)
+	rel, err := filepath.Rel(resolveExistingPrefix(parent), resolveExistingPrefix(child))
 	if err != nil {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func copyFromRoot(root *os.Root, name, dst string, perm os.FileMode) error {
-	in, err := root.Open(name)
+// resolveExistingPrefix returns the deepest existing ancestor of path with its
+// symlinks resolved, with the missing tail appended unchanged.
+func resolveExistingPrefix(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	rest := ""
+	for {
+		resolved, err := filepath.EvalSymlinks(abs)
+		if err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return filepath.Join(abs, rest)
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			return filepath.Join(abs, rest)
+		}
+		rest = filepath.Join(filepath.Base(abs), rest)
+		abs = parent
+	}
+}
+
+// copyFromRoot opens name without following a swapped-in FIFO, then stats the
+// open descriptor: whatever sits there now decides whether it is copied.
+func copyFromRoot(root *os.Root, name, dst string) error {
+	in, err := root.OpenFile(name, os.O_RDONLY|nonblockFlag, 0)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = in.Close() }()
 
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("refuse %s: not a regular file", name)
+	}
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
