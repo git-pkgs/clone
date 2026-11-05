@@ -86,8 +86,8 @@ func resolveExistingPrefix(path string) string {
 	}
 }
 
-// copyFromRoot opens name without following a swapped-in FIFO, then stats the
-// open descriptor: whatever sits there now decides whether it is copied.
+// copyFromRoot opens name without blocking on a FIFO, then stats the open
+// descriptor so whatever is there now decides whether it is copied.
 func copyFromRoot(root *os.Root, name, dst string) error {
 	in, err := root.OpenFile(name, os.O_RDONLY|nonblockFlag, 0)
 	if err != nil {
