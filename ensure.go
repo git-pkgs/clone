@@ -99,13 +99,7 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, options Ensu
 	return updateSubmodules(ctx, retry, dst, options.RecurseSubmodules)
 }
 
-// updateSubmodules disables the ambient credential helper, unlike the
-// top-level clone: submodule URLs come from the cloned repository's
-// .gitmodules, so an untrusted repository could otherwise name a private
-// repository the host's helper can read and have it fetched into the
-// checkout. Git passes `-c` overrides down to the clone and fetch processes
-// it starts for each submodule. Callers that need authenticated submodules
-// can still supply credentials through the environment.
+// Submodule URLs come from the cloned .gitmodules, so the ambient credential helper is disabled.
 func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool) error {
 	if !enabled {
 		return nil
