@@ -75,7 +75,8 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, options Ensu
 	// RemoteBranches/RemoteHead): a caller that reaches Ensure has already
 	// decided to clone this URL, and disabling the helper would make private
 	// repositories unreachable for callers that authenticate via stored git
-	// credentials rather than embedding a token in the URL.
+	// credentials rather than embedding a token in the URL. Submodule URLs
+	// are not chosen by the caller, so updateSubmodules does disable it.
 	args := []string{"clone", "--quiet"} //nolint:goconst // Git argv is clearer with literal subcommands and flags.
 	if !options.Full {
 		args = append(args, "--depth", "1")
@@ -98,12 +99,20 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, options Ensu
 	return updateSubmodules(ctx, retry, dst, options.RecurseSubmodules)
 }
 
+// updateSubmodules disables the ambient credential helper, unlike the
+// top-level clone: submodule URLs come from the cloned repository's
+// .gitmodules, so an untrusted repository could otherwise name a private
+// repository the host's helper can read and have it fetched into the
+// checkout. Git passes `-c` overrides down to the clone and fetch processes
+// it starts for each submodule. Callers that need authenticated submodules
+// can still supply credentials through the environment.
 func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool) error {
 	if !enabled {
 		return nil
 	}
 	policy := retry.Resolved()
-	if _, err := policy.Run(ctx, dst, remoteEnv(), longPathArgs("submodule", "sync", "--recursive")...); err != nil {
+	syncArgs := longPathArgs("-c", "credential.helper=", "submodule", "sync", "--recursive")
+	if _, err := policy.Run(ctx, dst, remoteEnv(), syncArgs...); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
@@ -112,7 +121,7 @@ func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool
 		Label: "submodule",
 		Dir:   dst,
 		Env:   remoteEnv(),
-		Args:  longPathArgs("submodule", "update", "--init", "--recursive", "--depth", "1"),
+		Args:  longPathArgs("-c", "credential.helper=", "submodule", "update", "--init", "--recursive", "--depth", "1"),
 	}); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
