@@ -16,6 +16,12 @@ import (
 // Entries that are neither directories, symlinks nor regular files are refused,
 // and src and dst may not contain one another.
 func CopyTree(ctx context.Context, src, dst string) error {
+	return copyTree(ctx, src, dst, openRootDir)
+}
+
+// copyTree takes the directory opener as a parameter so tests can interpose on
+// a path between its parent being listed and the open.
+func copyTree(ctx context.Context, src, dst string, open func(*os.Root, string) (*os.File, error)) error {
 	if containsPath(src, dst) || containsPath(dst, src) {
 		return fmt.Errorf("copy source and destination overlap: %q and %q", src, dst)
 	}
@@ -24,31 +30,78 @@ func CopyTree(ctx context.Context, src, dst string) error {
 		return err
 	}
 	defer func() { _ = root.Close() }()
-	return fs.WalkDir(root.FS(), ".", func(name string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
+	return copyDir(ctx, root, ".", dst, open)
+}
+
+// copyDir copies the directory name under root into dst. Directories are
+// opened without blocking and checked through the open descriptor, so a path
+// swapped for a FIFO after its parent was listed cannot stall the walk.
+func copyDir(ctx context.Context, root *os.Root, name, dst string, open func(*os.Root, string) (*os.File, error)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	dir, err := open(root, name)
+	if err != nil {
+		return err
+	}
+	info, err := dir.Stat()
+	if err != nil {
+		_ = dir.Close()
+		return err
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+		return err
+	}
+	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		target := filepath.Join(dst, filepath.FromSlash(name))
+		child := filepath.Join(name, entry.Name())
+		target := filepath.Join(dst, entry.Name())
 		switch {
-		case d.IsDir():
-			info, err := d.Info()
+		case entry.IsDir():
+			if err := copyDir(ctx, root, child, target, open); err != nil {
+				return err
+			}
+		case entry.Type()&fs.ModeSymlink != 0:
+			link, err := root.Readlink(child)
 			if err != nil {
 				return err
 			}
-			return os.MkdirAll(target, info.Mode().Perm())
-		case d.Type()&fs.ModeSymlink != 0:
-			link, err := root.Readlink(name)
-			if err != nil {
+			if err := os.Symlink(link, target); err != nil {
 				return err
 			}
-			return os.Symlink(link, target)
 		default:
-			return copyFromRoot(root, name, target)
+			if err := copyFromRoot(root, child, target); err != nil {
+				return err
+			}
 		}
-	})
+	}
+	return nil
+}
+
+// openRootDir opens name without blocking on a FIFO and verifies through the
+// open descriptor that it is still a directory before it is enumerated.
+func openRootDir(root *os.Root, name string) (*os.File, error) {
+	dir, err := root.OpenFile(name, os.O_RDONLY|nonblockFlag, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := dir.Stat()
+	if err != nil {
+		_ = dir.Close()
+		return nil, err
+	}
+	if !info.IsDir() {
+		_ = dir.Close()
+		return nil, fmt.Errorf("refuse %s: not a directory", name)
+	}
+	return dir, nil
 }
 
 // containsPath reports whether child is parent or lies under it, resolving
