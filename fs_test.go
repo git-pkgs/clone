@@ -91,3 +91,60 @@ func TestCopyTreeHonoursContext(t *testing.T) {
 		t.Fatalf("CopyTree error = %v, want context.Canceled", err)
 	}
 }
+
+func TestCopyTreeRefusesSymlinkPlantedUnderDestinationMidCopy(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "src")
+	sub := filepath.Join(src, "sub")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "file.txt"), []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "dst")
+	if err := os.Mkdir(dst, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	esc := filepath.Join(base, "escape")
+	if err := os.Mkdir(esc, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	probe := filepath.Join(dst, ".probe")
+	if err := os.Symlink(esc, probe); err != nil {
+		t.Skipf("cannot create symlinks here: %v", err)
+	}
+	if err := os.Remove(probe); err != nil {
+		t.Fatal(err)
+	}
+
+	opened := false
+	open := func(root *os.Root, name string) (*os.File, error) {
+		f, err := openRootDir(root, name)
+		if err == nil && name == "sub" && !opened {
+			opened = true
+			// Plant a link out of dst at the path the copy is about to create
+			// as a real directory: by path, Mkdir and the file creates that
+			// follow would land in esc, which the overlap check exists to
+			// prevent.
+			if lerr := os.Symlink(esc, filepath.Join(dst, "sub")); lerr != nil {
+				t.Fatal(lerr)
+			}
+		}
+		return f, err
+	}
+	if err := copyTree(context.Background(), src, dst, open); err == nil {
+		t.Fatal("copyTree succeeded after a symlink was planted under dst")
+	}
+	entries, err := os.ReadDir(esc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("escape directory holds %d entries; nothing may be written outside dst", len(entries))
+	}
+	content, err := os.ReadFile(filepath.Join(src, "sub", "file.txt"))
+	if err != nil || string(content) != "content" {
+		t.Fatalf("source changed outside dst: %q, %v", content, err)
+	}
+}

@@ -30,13 +30,30 @@ func copyTree(ctx context.Context, src, dst string, open func(*os.Root, string) 
 		return err
 	}
 	defer func() { _ = root.Close() }()
-	return copyDir(ctx, root, ".", dst, open)
+	probe, err := open(root, ".")
+	if err != nil {
+		return err
+	}
+	info, err := probe.Stat()
+	_ = probe.Close()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+		return err
+	}
+	// Anchor the destination: everything created under dst goes through a root
+	// pinned on the directory just created, so a symlink planted under dst
+	// mid-copy cannot redirect Mkdir, Symlink or file creates outside dst.
+	dstRoot, err := os.OpenRoot(dst)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dstRoot.Close() }()
+	return copyDir(ctx, root, ".", dstRoot, ".", false, open)
 }
 
-// copyDir copies the directory name under root into dst. Directories are
-// opened without blocking and checked through the open descriptor, so a path
-// swapped for a FIFO after its parent was listed cannot stall the walk.
-func copyDir(ctx context.Context, root *os.Root, name, dst string, open func(*os.Root, string) (*os.File, error)) error {
+func copyDir(ctx context.Context, root *os.Root, name string, dstRoot *os.Root, rel string, mkdir bool, open func(*os.Root, string) (*os.File, error)) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -54,18 +71,20 @@ func copyDir(ctx context.Context, root *os.Root, name, dst string, open func(*os
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
-		return err
+	if mkdir {
+		if err := dstRoot.Mkdir(rel, info.Mode().Perm()); err != nil {
+			return err
+		}
 	}
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		child := filepath.Join(name, entry.Name())
-		target := filepath.Join(dst, entry.Name())
+		target := filepath.Join(rel, entry.Name())
 		switch {
 		case entry.IsDir():
-			if err := copyDir(ctx, root, child, target, open); err != nil {
+			if err := copyDir(ctx, root, child, dstRoot, target, true, open); err != nil {
 				return err
 			}
 		case entry.Type()&fs.ModeSymlink != 0:
@@ -73,11 +92,14 @@ func copyDir(ctx context.Context, root *os.Root, name, dst string, open func(*os
 			if err != nil {
 				return err
 			}
-			if err := os.Symlink(link, target); err != nil {
+			if err := dstRoot.Symlink(link, target); err != nil {
 				return err
 			}
 		default:
-			if err := copyFromRoot(root, child, target); err != nil {
+			if !entry.Type().IsRegular() {
+				return fmt.Errorf("refuse %s: not a regular file", child)
+			}
+			if err := copyFromRoot(root, child, dstRoot, target); err != nil {
 				return err
 			}
 		}
@@ -141,7 +163,7 @@ func resolveExistingPrefix(path string) string {
 
 // copyFromRoot opens name without blocking on a FIFO, then stats the open
 // descriptor so whatever is there now decides whether it is copied.
-func copyFromRoot(root *os.Root, name, dst string) error {
+func copyFromRoot(root *os.Root, name string, dstRoot *os.Root, rel string) error {
 	in, err := root.OpenFile(name, os.O_RDONLY|nonblockFlag, 0)
 	if err != nil {
 		return err
@@ -156,7 +178,7 @@ func copyFromRoot(root *os.Root, name, dst string) error {
 		return fmt.Errorf("refuse %s: not a regular file", name)
 	}
 
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+	out, err := dstRoot.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
 	if err != nil {
 		return err
 	}
