@@ -3,10 +3,13 @@ package clone
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -204,6 +207,50 @@ func TestEnsureWithOptionsInitializesAndUpdatesShallowSubmodules(t *testing.T) {
 	}
 }
 
+// A hostile .gitmodules can name any https URL. The host's credential helper
+// must not be asked to authenticate it, or private repositories the operator
+// can read would be fetched into the untrusted checkout.
+func TestEnsureWithOptionsDoesNotUseCredentialHelperForSubmodules(t *testing.T) {
+	fixture := newSubmoduleOriginFixture(t)
+
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("WWW-Authenticate", `Basic realm="private"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	origin := fixture.origin.dir
+	runGitTest(t, origin, "config", "-f", ".gitmodules", "submodule.vendor/library.url", server.URL+"/private.git")
+	runGitTest(t, origin, "commit", "--quiet", "-am", "point submodule at private repository")
+
+	marker := filepath.Join(t.TempDir(), "helper-called")
+	t.Setenv("CLONE_TEST_HELPER_MARKER", filepath.ToSlash(marker))
+	t.Setenv("GIT_CONFIG_COUNT", "4")
+	t.Setenv("GIT_CONFIG_KEY_2", "credential.helper")
+	t.Setenv("GIT_CONFIG_VALUE_2", `!f() { echo "$1" >> "$CLONE_TEST_HELPER_MARKER"; }; f`)
+	t.Setenv("GIT_CONFIG_KEY_3", "http.sslVerify")
+	t.Setenv("GIT_CONFIG_VALUE_3", "false")
+
+	dst := filepath.Join(t.TempDir(), "checkout")
+	options := EnsureOptions{RecurseSubmodules: true}
+	if err := EnsureWithOptions(context.Background(), Retry{}, fixture.origin.url, dst, "", options); err != nil {
+		t.Fatalf("EnsureWithOptions: %v", err)
+	}
+	if requests.Load() == 0 {
+		t.Fatal("submodule update never contacted the private repository")
+	}
+	if calls, err := os.ReadFile(marker); err == nil {
+		t.Errorf("credential helper was invoked for submodule URL: %q", calls)
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "file.txt")); err != nil {
+		t.Errorf("parent checkout unusable after submodule failure: %v", err)
+	}
+}
+
 func TestEnsureWithOptionsIgnoresSubmoduleFailure(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "checkout")
 	if err := os.MkdirAll(filepath.Join(dst, ".git"), 0o755); err != nil {
@@ -244,11 +291,16 @@ func TestEnsureWithOptionsIgnoresSubmoduleFailure(t *testing.T) {
 	); err != nil {
 		t.Fatalf("EnsureWithOptions: %v", err)
 	}
-	wantSyncArgs := []string{"-c", "core.longpaths=true", "submodule", "sync", "--recursive"}
+	wantSyncArgs := []string{
+		"-c", "core.longpaths=true", "-c", "credential.helper=", "submodule", "sync", "--recursive",
+	}
 	if !slices.Equal(syncArgs, wantSyncArgs) {
 		t.Errorf("submodule sync args = %v, want %v", syncArgs, wantSyncArgs)
 	}
-	wantUpdateArgs := []string{"-c", "core.longpaths=true", "submodule", "update", "--init", "--recursive", "--depth", "1"}
+	wantUpdateArgs := []string{
+		"-c", "core.longpaths=true", "-c", "credential.helper=",
+		"submodule", "update", "--init", "--recursive", "--depth", "1",
+	}
 	if !slices.Equal(updateArgs, wantUpdateArgs) {
 		t.Errorf("submodule update args = %v, want %v", updateArgs, wantUpdateArgs)
 	}
