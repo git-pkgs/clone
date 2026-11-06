@@ -1,4 +1,4 @@
-//go:build !windows && !js
+//go:build unix
 
 package clone
 

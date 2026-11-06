@@ -58,6 +58,28 @@ func TestCopyTreeReturnsSourceError(t *testing.T) {
 	}
 }
 
+func TestCopyTreeSingleFileSource(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "note.txt")
+	if err := os.WriteFile(src, []byte("body"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "note-copy.txt")
+	if err := CopyTree(context.Background(), src, dst); err != nil {
+		t.Fatalf("CopyTree on a regular file failed: %v", err)
+	}
+	content, err := os.ReadFile(dst)
+	if err != nil || string(content) != "body" {
+		t.Fatalf("dst content = %q, %v; want %q", content, err, "body")
+	}
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o640 {
+		t.Errorf("dst mode = %v, want %v", info.Mode().Perm(), os.FileMode(0o640))
+	}
+}
+
 func TestCopyTreeRefusesOverlap(t *testing.T) {
 	src := t.TempDir()
 	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("content"), 0o600); err != nil {
@@ -123,10 +145,8 @@ func TestCopyTreeRefusesSymlinkPlantedUnderDestinationMidCopy(t *testing.T) {
 		f, err := openRootDir(root, name)
 		if err == nil && name == "sub" && !opened {
 			opened = true
-			// Plant a link out of dst at the path the copy is about to create
-			// as a real directory: by path, Mkdir and the file creates that
-			// follow would land in esc, which the overlap check exists to
-			// prevent.
+			// Plant a link out of dst where Mkdir would create it: by path,
+			// the Mkdir and file create below would land in esc.
 			if lerr := os.Symlink(esc, filepath.Join(dst, "sub")); lerr != nil {
 				t.Fatal(lerr)
 			}

@@ -12,9 +12,11 @@ import (
 )
 
 // CopyTree recursively copies src to dst, preserving permissions but not
-// ownership or timestamps. Symlinks are recreated with their original target.
+// ownership or timestamps. src may be a single regular file, in which case it
+// is copied to dst directly. Symlinks are recreated with their original target.
 // Entries that are neither directories, symlinks nor regular files are refused,
-// and src and dst may not contain one another.
+// and src and dst may not contain one another; dst must not already contain
+// any of src's subdirectories either.
 func CopyTree(ctx context.Context, src, dst string) error {
 	return copyTree(ctx, src, dst, openRootDir)
 }
@@ -24,6 +26,9 @@ func CopyTree(ctx context.Context, src, dst string) error {
 func copyTree(ctx context.Context, src, dst string, open func(*os.Root, string) (*os.File, error)) error {
 	if containsPath(src, dst) || containsPath(dst, src) {
 		return fmt.Errorf("copy source and destination overlap: %q and %q", src, dst)
+	}
+	if srcInfo, err := os.Lstat(src); err == nil && srcInfo.Mode().IsRegular() {
+		return copyFileTree(ctx, src, dst)
 	}
 	root, err := os.OpenRoot(src)
 	if err != nil {
@@ -42,9 +47,6 @@ func copyTree(ctx context.Context, src, dst string, open func(*os.Root, string) 
 	if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
 		return err
 	}
-	// Anchor the destination: everything created under dst goes through a root
-	// pinned on the directory just created, so a symlink planted under dst
-	// mid-copy cannot redirect Mkdir, Symlink or file creates outside dst.
 	dstRoot, err := os.OpenRoot(dst)
 	if err != nil {
 		return err
@@ -159,6 +161,37 @@ func resolveExistingPrefix(path string) string {
 		rest = filepath.Join(filepath.Base(abs), rest)
 		abs = parent
 	}
+}
+
+// copyFileTree copies a lone regular file from src to dst. The open is
+// non-blocking and the post-open stat decides, matching how file entries are
+// copied inside a tree, so a path swapped for a FIFO before the open is
+// refused instead of blocking.
+func copyFileTree(ctx context.Context, src, dst string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	in, err := os.OpenFile(src, os.O_RDONLY|nonblockFlag, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("refuse %s: not a regular file", src)
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // copyFromRoot opens name without blocking on a FIFO, then stats the open
