@@ -504,6 +504,7 @@ func ensureWithoutSubmodules(t *testing.T, url string) string {
 	return dst
 }
 
+// assertCheckedOut checks which files exist under dst, keyed by slash path.
 func assertCheckedOut(t *testing.T, dst string, want map[string]bool) {
 	t.Helper()
 	for name, present := range want {
@@ -594,5 +595,59 @@ func TestUpdateSubmodulesWithinStopsAtModuleLimit(t *testing.T) {
 			t.Fatalf("maxModules %d: %v", test.maxModules, err)
 		}
 		assertCheckedOut(t, dst, test.want)
+	}
+}
+
+func TestUpdateSubmodulesWithinSkipsCheckoutNotAtGitlink(t *testing.T) {
+	requireGit(t)
+
+	// top -> a -> b, each nested at "sub".
+	top := newTestRepository(t, "top.txt")
+	a := newTestRepository(t, "a.txt")
+	b := newTestRepository(t, "b.txt")
+	const (
+		topURL = "https://clone.test/top.git"
+		aURL   = "https://clone.test/a.git"
+		bURL   = "https://clone.test/b.git"
+	)
+	configureTestURLs(t, map[string]string{topURL: top.dir, aURL: a.dir, bURL: b.dir})
+	addTestSubmodule(t, a.dir, bURL, "sub")
+	addTestSubmodule(t, top.dir, aURL, "sub")
+
+	dst := filepath.Join(t.TempDir(), "checkout")
+	ctx := context.Background()
+	options := EnsureOptions{RecurseSubmodules: true}
+	if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", options); err != nil {
+		t.Fatalf("first EnsureWithOptions: %v", err)
+	}
+	assertCheckedOut(t, dst, map[string]bool{"sub/a.txt": true, "sub/sub/b.txt": true})
+
+	// Point top's gitlink at a commit a's remote does not have, so updating
+	// the existing checkout of a fails and leaves it at its old HEAD.
+	missing := "0123456789abcdef0123456789abcdef01234567"
+	runGitTest(t, top.dir, "update-index", "--cacheinfo", "160000,"+missing+",sub")
+	runGitTest(t, top.dir, "commit", "--quiet", "-m", "point sub at a missing commit")
+
+	stale := pathFromGit(dst, "sub")
+	var staleCommands [][]string
+	retry := Retry{
+		Attempts: 1,
+		Run: func(ctx context.Context, dir string, env []string, args ...string) (string, error) {
+			if dir == stale {
+				staleCommands = append(staleCommands, args)
+			}
+			return Run(ctx, dir, env, args...)
+		},
+	}
+	if err := EnsureWithOptions(ctx, retry, topURL, dst, "", options); err != nil {
+		t.Fatalf("second EnsureWithOptions: %v", err)
+	}
+	for _, args := range staleCommands {
+		if subcommand(args) != "rev-parse" {
+			t.Errorf("walked into checkout not at its gitlink: git %v", args)
+		}
+	}
+	if len(staleCommands) == 0 {
+		t.Error("stale checkout HEAD was never compared with its gitlink")
 	}
 }

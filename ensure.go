@@ -112,6 +112,7 @@ type submoduleBudget struct {
 	maxModules int
 }
 
+// updateSubmodules fetches dst's submodules within the default limits when enabled.
 func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool) error {
 	if !enabled {
 		return nil
@@ -125,7 +126,8 @@ func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool
 // updateSubmodulesWithin walks submodules breadth first, one level per Git
 // call, instead of using --recursive. Each level's gitlinks are counted before
 // it is fetched, and the walk stops before exceeding the budget, keeping the
-// levels already fetched. Only context errors are returned.
+// levels already fetched. Like git's own --recursive, it descends only into
+// submodules checked out at their gitlink. Only context errors are returned.
 func updateSubmodulesWithin(ctx context.Context, retry Retry, dst string, budget submoduleBudget) error {
 	type pending struct {
 		dir   string
@@ -140,23 +142,31 @@ func updateSubmodulesWithin(ctx context.Context, retry Retry, dst string, budget
 		if current.depth > budget.maxDepth {
 			return nil
 		}
-		paths, err := submoduleGitlinks(ctx, policy, current.dir)
+		links, err := submoduleGitlinks(ctx, policy, current.dir)
 		if err != nil {
 			return err
 		}
-		if len(paths) == 0 {
+		if len(links) == 0 {
 			continue
 		}
-		if fetched+len(paths) > budget.maxModules {
+		if fetched+len(links) > budget.maxModules {
 			return nil
 		}
-		fetched += len(paths)
+		fetched += len(links)
+		paths := make([]string, len(links))
+		for i, link := range links {
+			paths[i] = link.path
+		}
 		if err := updateSubmoduleLevel(ctx, policy, current.dir, paths); err != nil {
 			return err
 		}
-		for _, submodulePath := range paths {
-			child := pathFromGit(current.dir, submodulePath)
-			if initializedSubmodule(child) {
+		for _, link := range links {
+			child := pathFromGit(current.dir, link.path)
+			ok, err := checkedOutAt(ctx, policy, child, link.commit)
+			if err != nil {
+				return err
+			}
+			if ok {
 				queue = append(queue, pending{dir: child, depth: current.depth + 1})
 			}
 		}
@@ -190,10 +200,15 @@ func updateSubmoduleLevel(ctx context.Context, policy Retry, dir string, paths [
 	return nil
 }
 
-// submoduleGitlinks returns the sorted paths that dir's .gitmodules declares
-// and HEAD records as gitlinks: the submodules one update of dir can fetch.
-// A missing or unreadable .gitmodules yields no paths.
-func submoduleGitlinks(ctx context.Context, policy Retry, dir string) ([]string, error) {
+type gitlink struct {
+	path   string
+	commit string
+}
+
+// submoduleGitlinks returns the paths that dir's .gitmodules declares and HEAD
+// records as gitlinks, sorted by path: the submodules one update of dir can
+// fetch. A missing or unreadable .gitmodules yields none.
+func submoduleGitlinks(ctx context.Context, policy Retry, dir string) ([]gitlink, error) {
 	out, err := policy.Run(ctx, dir, nil,
 		"config", "-z", "--blob", gitmodulesBlob, "--get-regexp", `^submodule\..*\.path$`,
 	)
@@ -223,7 +238,7 @@ func submoduleGitlinks(ctx context.Context, policy Retry, dir string) ([]string,
 	if err != nil {
 		return nil, ctx.Err()
 	}
-	var paths []string
+	var links []gitlink
 	for entry := range strings.SplitSeq(strings.TrimSuffix(out, "\x00"), "\x00") {
 		metadata, treePath, ok := strings.Cut(entry, "\t")
 		if !ok || !declared[treePath] {
@@ -231,22 +246,36 @@ func submoduleGitlinks(ctx context.Context, policy Retry, dir string) ([]string,
 		}
 		fields := strings.Fields(metadata)
 		if len(fields) == 3 && fields[0] == "160000" && fields[1] == "commit" && ValidCommit(fields[2]) {
-			paths = append(paths, treePath)
+			links = append(links, gitlink{path: treePath, commit: fields[2]})
 		}
 	}
-	sort.Strings(paths)
-	return paths, nil
+	sort.Slice(links, func(i, j int) bool {
+		return links[i].path < links[j].path
+	})
+	return links, nil
 }
 
-// initializedSubmodule reports whether dir is a real directory holding a
-// submodule checkout, so the walk never follows a symlink out of the tree.
-func initializedSubmodule(dir string) bool {
+// checkedOutAt reports whether dir is a real directory holding a submodule
+// checkout whose HEAD is commit. Rejecting symlinks keeps the walk inside the
+// tree; the ceiling stops an uninitialized directory from resolving to its
+// parent's HEAD.
+func checkedOutAt(ctx context.Context, policy Retry, dir, commit string) (bool, error) {
 	info, err := os.Lstat(dir)
 	if err != nil || !info.IsDir() {
-		return false
+		return false, nil
 	}
-	_, err = os.Lstat(filepath.Join(dir, ".git"))
-	return err == nil
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); err != nil {
+		return false, nil
+	}
+	ceiling, err := filepath.Abs(filepath.Dir(dir))
+	if err != nil {
+		return false, nil
+	}
+	out, err := policy.Run(ctx, dir, []string{"GIT_CEILING_DIRECTORIES=" + ceiling}, "rev-parse", "HEAD")
+	if err != nil {
+		return false, ctx.Err()
+	}
+	return strings.TrimSpace(out) == commit, nil
 }
 
 // fetchRef takes url only so it can be pinned against ambient insteadOf
