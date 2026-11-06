@@ -251,6 +251,20 @@ func TestEnsureWithOptionsDoesNotUseCredentialHelperForSubmodules(t *testing.T) 
 	}
 }
 
+const fakeGitlink = "0123456789abcdef0123456789abcdef01234567"
+
+// fakeSubmoduleListing answers the local Git queries updateSubmodulesWithin
+// makes before fetching, declaring one gitlink at vendor/library.
+func fakeSubmoduleListing(args []string) (string, bool) {
+	switch subcommand(args) {
+	case "config":
+		return "submodule.library.path\nvendor/library\x00", true
+	case "ls-tree":
+		return "160000 commit " + fakeGitlink + "\tvendor/library\x00", true
+	}
+	return "", false
+}
+
 func TestEnsureWithOptionsIgnoresSubmoduleFailure(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "checkout")
 	if err := os.MkdirAll(filepath.Join(dst, ".git"), 0o755); err != nil {
@@ -264,6 +278,9 @@ func TestEnsureWithOptionsIgnoresSubmoduleFailure(t *testing.T) {
 	retry := Retry{
 		Attempts: 1,
 		Run: func(_ context.Context, dir string, env []string, args ...string) (string, error) {
+			if out, ok := fakeSubmoduleListing(args); ok {
+				return out, nil
+			}
 			switch subcommand(args) {
 			case "fetch", "reset":
 				return "", nil
@@ -292,20 +309,20 @@ func TestEnsureWithOptionsIgnoresSubmoduleFailure(t *testing.T) {
 		t.Fatalf("EnsureWithOptions: %v", err)
 	}
 	wantSyncArgs := []string{
-		"-c", "core.longpaths=true", "-c", "credential.helper=", "submodule", "sync", "--recursive",
+		"-c", "core.longpaths=true", "-c", "credential.helper=", "submodule", "sync", "--", "vendor/library",
 	}
 	if !slices.Equal(syncArgs, wantSyncArgs) {
 		t.Errorf("submodule sync args = %v, want %v", syncArgs, wantSyncArgs)
 	}
 	wantUpdateArgs := []string{
 		"-c", "core.longpaths=true", "-c", "credential.helper=",
-		"submodule", "update", "--init", "--recursive", "--depth", "1",
+		"submodule", "update", "--init", "--depth", "1", "--", "vendor/library",
 	}
 	if !slices.Equal(updateArgs, wantUpdateArgs) {
 		t.Errorf("submodule update args = %v, want %v", updateArgs, wantUpdateArgs)
 	}
 	for name, env := range map[string][]string{"sync": syncEnv, "update": updateEnv} {
-		if !slices.Contains(env, "GIT_PROTOCOL_FROM_USER=0") {
+		if !slices.Contains(env, "GIT_PROTOCOL_FROM_USER=0") || !slices.Contains(env, "GIT_LITERAL_PATHSPECS=1") {
 			t.Errorf("submodule %s env = %v", name, env)
 		}
 	}
@@ -321,6 +338,9 @@ func TestEnsureWithOptionsReturnsSubmoduleCancellation(t *testing.T) {
 	retry := Retry{
 		Attempts: 1,
 		Run: func(_ context.Context, _ string, _ []string, args ...string) (string, error) {
+			if out, ok := fakeSubmoduleListing(args); ok {
+				return out, nil
+			}
 			if subcommand(args) == "submodule" {
 				cancel()
 				return "submodule canceled", errGitExit
@@ -470,5 +490,109 @@ func TestEnsureUnknownRefReturnsUnreachableError(t *testing.T) {
 func TestHeadReturnsEmptyOutsideRepository(t *testing.T) {
 	if got := Head(context.Background(), t.TempDir()); got != "" {
 		t.Errorf("Head = %q, want empty", got)
+	}
+}
+
+// ensureWithoutSubmodules clones url into a fresh directory without touching
+// its submodules, so a test can drive updateSubmodulesWithin directly.
+func ensureWithoutSubmodules(t *testing.T, url string) string {
+	t.Helper()
+	dst := filepath.Join(t.TempDir(), "checkout")
+	if err := Ensure(context.Background(), Retry{}, url, dst, "", false); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	return dst
+}
+
+func assertCheckedOut(t *testing.T, dst string, want map[string]bool) {
+	t.Helper()
+	for name, present := range want {
+		_, err := os.Stat(filepath.Join(dst, filepath.FromSlash(name)))
+		if present && err != nil {
+			t.Errorf("%s missing: %v", name, err)
+		}
+		if !present && !os.IsNotExist(err) {
+			t.Errorf("%s exists beyond the submodule budget (err %v)", name, err)
+		}
+	}
+}
+
+func addTestSubmodule(t *testing.T, parentDir, url, submodulePath string) {
+	t.Helper()
+	runGitTest(t, parentDir, "submodule", "add", "--quiet", url, submodulePath)
+	runGitTest(t, parentDir, "commit", "--quiet", "-m", "add "+submodulePath)
+}
+
+func TestUpdateSubmodulesWithinStopsAtDepthLimit(t *testing.T) {
+	requireGit(t)
+
+	// top -> a -> b -> c, each nested at "sub".
+	top := newTestRepository(t, "top.txt")
+	a := newTestRepository(t, "a.txt")
+	b := newTestRepository(t, "b.txt")
+	c := newTestRepository(t, "c.txt")
+	const (
+		topURL = "https://clone.test/top.git"
+		aURL   = "https://clone.test/a.git"
+		bURL   = "https://clone.test/b.git"
+		cURL   = "https://clone.test/c.git"
+	)
+	configureTestURLs(t, map[string]string{topURL: top.dir, aURL: a.dir, bURL: b.dir, cURL: c.dir})
+	addTestSubmodule(t, b.dir, cURL, "sub")
+	addTestSubmodule(t, a.dir, bURL, "sub")
+	addTestSubmodule(t, top.dir, aURL, "sub")
+
+	for _, test := range []struct {
+		maxDepth int
+		want     map[string]bool
+	}{
+		{1, map[string]bool{"sub/a.txt": true, "sub/sub/b.txt": false, "sub/sub/sub/c.txt": false}},
+		{2, map[string]bool{"sub/a.txt": true, "sub/sub/b.txt": true, "sub/sub/sub/c.txt": false}},
+		{3, map[string]bool{"sub/a.txt": true, "sub/sub/b.txt": true, "sub/sub/sub/c.txt": true}},
+	} {
+		dst := ensureWithoutSubmodules(t, topURL)
+		budget := submoduleBudget{maxDepth: test.maxDepth, maxModules: maxSubmodules}
+		if err := updateSubmodulesWithin(context.Background(), Retry{}, dst, budget); err != nil {
+			t.Fatalf("maxDepth %d: %v", test.maxDepth, err)
+		}
+		assertCheckedOut(t, dst, test.want)
+	}
+}
+
+func TestUpdateSubmodulesWithinStopsAtModuleLimit(t *testing.T) {
+	requireGit(t)
+
+	// top declares x and y; x declares z.
+	top := newTestRepository(t, "top.txt")
+	x := newTestRepository(t, "x.txt")
+	y := newTestRepository(t, "y.txt")
+	z := newTestRepository(t, "z.txt")
+	const (
+		topURL = "https://clone.test/top.git"
+		xURL   = "https://clone.test/x.git"
+		yURL   = "https://clone.test/y.git"
+		zURL   = "https://clone.test/z.git"
+	)
+	configureTestURLs(t, map[string]string{topURL: top.dir, xURL: x.dir, yURL: y.dir, zURL: z.dir})
+	addTestSubmodule(t, x.dir, zURL, "z")
+	addTestSubmodule(t, top.dir, xURL, "x")
+	addTestSubmodule(t, top.dir, yURL, "y")
+
+	for _, test := range []struct {
+		maxModules int
+		want       map[string]bool
+	}{
+		// A level that would exceed the budget is not fetched at all.
+		{1, map[string]bool{"x/x.txt": false, "y/y.txt": false, "x/z/z.txt": false}},
+		// Levels already fetched are kept when a later level would exceed it.
+		{2, map[string]bool{"x/x.txt": true, "y/y.txt": true, "x/z/z.txt": false}},
+		{3, map[string]bool{"x/x.txt": true, "y/y.txt": true, "x/z/z.txt": true}},
+	} {
+		dst := ensureWithoutSubmodules(t, topURL)
+		budget := submoduleBudget{maxDepth: maxSubmoduleDepth, maxModules: test.maxModules}
+		if err := updateSubmodulesWithin(context.Background(), Retry{}, dst, budget); err != nil {
+			t.Fatalf("maxModules %d: %v", test.maxModules, err)
+		}
+		assertCheckedOut(t, dst, test.want)
 	}
 }
