@@ -1,10 +1,11 @@
-//go:build !windows
+//go:build unix
 
 package clone
 
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,5 +95,39 @@ func TestCopyTreeHonoursCancellationDuringWalk(t *testing.T) {
 	err := copyTree(ctx, src, filepath.Join(t.TempDir(), "copy"), open)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("CopyTree error = %v, want context.Canceled", err)
+	}
+}
+
+func TestCopyTreeRecreatesSymlinkSource(t *testing.T) {
+	base := t.TempDir()
+	file := filepath.Join(base, "note.txt")
+	if err := os.WriteFile(file, []byte("body"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ name, target string }{
+		{"to-file", file},
+		{"to-dir", base},
+		{"dangling", filepath.Join(base, "gone")},
+	}
+	for _, tc := range cases {
+		src := filepath.Join(t.TempDir(), tc.name)
+		if err := os.Symlink(tc.target, src); err != nil {
+			t.Fatal(err)
+		}
+		dst := filepath.Join(t.TempDir(), "dst")
+		if err := CopyTree(context.Background(), src, dst); err != nil {
+			t.Fatalf("CopyTree on a %s symlink source failed: %v", tc.name, err)
+		}
+		info, err := os.Lstat(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&fs.ModeSymlink == 0 {
+			t.Fatalf("dst for a %s symlink source has mode %v, want a recreated symlink", tc.name, info.Mode())
+		}
+		link, err := os.Readlink(dst)
+		if err != nil || link != tc.target {
+			t.Fatalf("dst link = %q, %v; want %q", link, err, tc.target)
+		}
 	}
 }

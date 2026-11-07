@@ -2,7 +2,5 @@
 
 package clone
 
-// Non-unix targets either have no FIFOs to block on (windows) or cannot know
-// the host OS's O_NONBLOCK value (js/wasm, wasip1), so the open stays plain;
-// the post-open stat refuses whatever turns out to be there.
+// No O_NONBLOCK here; the post-open stat still refuses non-regular files.
 const nonblockFlag = 0

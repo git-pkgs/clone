@@ -12,11 +12,12 @@ import (
 )
 
 // CopyTree recursively copies src to dst, preserving permissions but not
-// ownership or timestamps. src may be a single regular file, in which case it
-// is copied to dst directly. Symlinks are recreated with their original target.
-// Entries that are neither directories, symlinks nor regular files are refused,
-// and src and dst may not contain one another; dst must not already contain
-// any of src's subdirectories either.
+// ownership or timestamps. src may be a single regular file, which is copied
+// to dst directly; a symlink src and symlinks inside the tree are both
+// recreated at their destination with their original target. Entries that are
+// neither directories, symlinks nor regular files are refused, and src and dst
+// may not contain one another; dst must not already contain any of src's
+// subdirectories either.
 func CopyTree(ctx context.Context, src, dst string) error {
 	return copyTree(ctx, src, dst, openRootDir)
 }
@@ -27,8 +28,17 @@ func copyTree(ctx context.Context, src, dst string, open func(*os.Root, string) 
 	if containsPath(src, dst) || containsPath(dst, src) {
 		return fmt.Errorf("copy source and destination overlap: %q and %q", src, dst)
 	}
-	if srcInfo, err := os.Lstat(src); err == nil && srcInfo.Mode().IsRegular() {
-		return copyFileTree(ctx, src, dst)
+	if srcInfo, err := os.Lstat(src); err == nil {
+		if srcInfo.Mode().IsRegular() {
+			return copyFileTree(ctx, src, dst)
+		}
+		if srcInfo.Mode()&fs.ModeSymlink != 0 {
+			link, err := os.Readlink(src)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, dst)
+		}
 	}
 	root, err := os.OpenRoot(src)
 	if err != nil {
@@ -163,10 +173,8 @@ func resolveExistingPrefix(path string) string {
 	}
 }
 
-// copyFileTree copies a lone regular file from src to dst. The open is
-// non-blocking and the post-open stat decides, matching how file entries are
-// copied inside a tree, so a path swapped for a FIFO before the open is
-// refused instead of blocking.
+// copyFileTree copies a lone regular file src with copyFromRoot's
+// open-then-stat refusal.
 func copyFileTree(ctx context.Context, src, dst string) error {
 	if err := ctx.Err(); err != nil {
 		return err
