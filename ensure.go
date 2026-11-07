@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -99,29 +100,182 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, options Ensu
 	return updateSubmodules(ctx, retry, dst, options.RecurseSubmodules)
 }
 
-// Submodule URLs come from the cloned .gitmodules, so the ambient credential helper is disabled.
+// Limits on recursive submodule updates, so nested or repeated gitlinks in a
+// compact history cannot expand into an unbounded number of checkouts.
+const (
+	maxSubmoduleDepth = 8
+	maxSubmodules     = 256
+)
+
+type submoduleBudget struct {
+	maxDepth   int
+	maxModules int
+}
+
+// updateSubmodules fetches dst's submodules within the default limits when enabled.
 func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool) error {
 	if !enabled {
 		return nil
 	}
+	return updateSubmodulesWithin(ctx, retry, dst, submoduleBudget{
+		maxDepth:   maxSubmoduleDepth,
+		maxModules: maxSubmodules,
+	})
+}
+
+// updateSubmodulesWithin walks submodules breadth first, one repository's
+// submodules per Git call. Each batch is counted before it is fetched, and the
+// walk stops before exceeding the budget, keeping what was already fetched.
+// Like git's own --recursive, it descends only into submodules checked out at
+// their gitlink. Only context errors are returned.
+func updateSubmodulesWithin(ctx context.Context, retry Retry, dst string, budget submoduleBudget) error {
+	type pending struct {
+		dir   string
+		depth int // depth of the submodules declared in dir
+	}
 	policy := retry.Resolved()
-	syncArgs := longPathArgs("-c", "credential.helper=", "submodule", "sync", "--recursive")
-	if _, err := policy.Run(ctx, dst, remoteEnv(), syncArgs...); err != nil {
+	queue := []pending{{dir: dst, depth: 1}}
+	fetched := 0
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if current.depth > budget.maxDepth {
+			return nil
+		}
+		links, err := submoduleGitlinks(ctx, policy, current.dir)
+		if err != nil {
+			return err
+		}
+		if len(links) == 0 {
+			continue
+		}
+		if fetched+len(links) > budget.maxModules {
+			return nil
+		}
+		fetched += len(links)
+		paths := make([]string, len(links))
+		for i, link := range links {
+			paths[i] = link.path
+		}
+		if err := updateSubmoduleLevel(ctx, policy, current.dir, paths); err != nil {
+			return err
+		}
+		for _, link := range links {
+			child := pathFromGit(current.dir, link.path)
+			ok, err := checkedOutAt(ctx, policy, child, link.commit)
+			if err != nil {
+				return err
+			}
+			if ok {
+				queue = append(queue, pending{dir: child, depth: current.depth + 1})
+			}
+		}
+	}
+	return nil
+}
+
+// updateSubmoduleLevel syncs and updates exactly the given submodules of dir.
+// Submodule URLs come from the cloned .gitmodules, so the ambient credential
+// helper is disabled. Literal pathspecs keep a path from matching more
+// submodules than were counted.
+func updateSubmoduleLevel(ctx context.Context, policy Retry, dir string, paths []string) error {
+	env := append(remoteEnv(), "GIT_LITERAL_PATHSPECS=1")
+	syncArgs := append([]string{"-c", "credential.helper=", "submodule", "sync", "--"}, paths...)
+	if _, err := policy.Run(ctx, dir, env, longPathArgs(syncArgs...)...); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
 	}
+	updateArgs := append([]string{"-c", "credential.helper=", "submodule", "update", "--init", "--depth", "1", "--"}, paths...)
 	if _, err := policy.Do(ctx, Command{
 		Label: "submodule",
-		Dir:   dst,
-		Env:   remoteEnv(),
-		Args:  longPathArgs("-c", "credential.helper=", "submodule", "update", "--init", "--recursive", "--depth", "1"),
+		Dir:   dir,
+		Env:   env,
+		Args:  longPathArgs(updateArgs...),
 	}); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
 	}
 	return nil
+}
+
+type gitlink struct {
+	path   string
+	commit string
+}
+
+// submoduleGitlinks returns the paths that dir's .gitmodules declares and HEAD
+// records as gitlinks, sorted by path: the submodules one update of dir can
+// fetch. A missing or unreadable .gitmodules yields none.
+func submoduleGitlinks(ctx context.Context, policy Retry, dir string) ([]gitlink, error) {
+	out, err := policy.Run(ctx, dir, nil,
+		"config", "-z", "--blob", gitmodulesBlob, "--get-regexp", `^submodule\..*\.path$`,
+	)
+	if err != nil {
+		return nil, ctx.Err()
+	}
+	declared := map[string]bool{}
+	var candidates []string
+	for entry := range strings.SplitSeq(strings.TrimSuffix(out, "\x00"), "\x00") {
+		_, value, ok := strings.Cut(entry, "\n")
+		if !ok {
+			continue
+		}
+		submodulePath, ok := SanitizePath(value)
+		if !ok || declared[submodulePath] {
+			continue
+		}
+		declared[submodulePath] = true
+		candidates = append(candidates, submodulePath)
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	env := []string{"GIT_LITERAL_PATHSPECS=1"}
+	out, err = policy.Run(ctx, dir, env, append([]string{"ls-tree", "-z", "HEAD", "--"}, candidates...)...)
+	if err != nil {
+		return nil, ctx.Err()
+	}
+	var links []gitlink
+	for entry := range strings.SplitSeq(strings.TrimSuffix(out, "\x00"), "\x00") {
+		metadata, treePath, ok := strings.Cut(entry, "\t")
+		if !ok || !declared[treePath] {
+			continue
+		}
+		fields := strings.Fields(metadata)
+		if len(fields) == 3 && fields[0] == "160000" && fields[1] == "commit" && ValidCommit(fields[2]) {
+			links = append(links, gitlink{path: treePath, commit: fields[2]})
+		}
+	}
+	sort.Slice(links, func(i, j int) bool {
+		return links[i].path < links[j].path
+	})
+	return links, nil
+}
+
+// checkedOutAt reports whether dir is a real directory holding a submodule
+// checkout whose HEAD is commit. Rejecting symlinks keeps the walk inside the
+// tree; the ceiling stops an uninitialized directory from resolving to its
+// parent's HEAD.
+func checkedOutAt(ctx context.Context, policy Retry, dir, commit string) (bool, error) {
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() {
+		return false, nil
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); err != nil {
+		return false, nil
+	}
+	ceiling, err := filepath.Abs(filepath.Dir(dir))
+	if err != nil {
+		return false, nil
+	}
+	out, err := policy.Run(ctx, dir, []string{"GIT_CEILING_DIRECTORIES=" + ceiling}, "rev-parse", "HEAD")
+	if err != nil {
+		return false, ctx.Err()
+	}
+	return strings.TrimSpace(out) == commit, nil
 }
 
 // fetchRef takes url only so it can be pinned against ambient insteadOf
