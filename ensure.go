@@ -123,11 +123,11 @@ func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool
 	})
 }
 
-// updateSubmodulesWithin walks submodules breadth first, one level per Git
-// call, instead of using --recursive. Each level's gitlinks are counted before
-// it is fetched, and the walk stops before exceeding the budget, keeping the
-// levels already fetched. Like git's own --recursive, it descends only into
-// submodules checked out at their gitlink. Only context errors are returned.
+// updateSubmodulesWithin walks submodules breadth first, one repository's
+// submodules per Git call. Each batch is counted before it is fetched, and the
+// walk stops before exceeding the budget, keeping what was already fetched.
+// Like git's own --recursive, it descends only into submodules checked out at
+// their gitlink. Only context errors are returned.
 func updateSubmodulesWithin(ctx context.Context, retry Retry, dst string, budget submoduleBudget) error {
 	type pending struct {
 		dir   string
