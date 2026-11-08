@@ -12,12 +12,9 @@ import (
 )
 
 // CopyTree recursively copies src to dst, preserving permissions but not
-// ownership or timestamps. src may be a single regular file, which is copied
-// to dst directly; a symlink src and symlinks inside the tree are both
-// recreated at their destination with their original target. Entries that are
-// neither directories, symlinks nor regular files are refused, and src and dst
-// may not contain one another; dst must not already contain any of src's
-// subdirectories either.
+// ownership or timestamps. src may be a regular file or symlink; non-regular
+// entries are refused, src and dst may not overlap, and dst must not already
+// contain src's subdirectories.
 func CopyTree(ctx context.Context, src, dst string) error {
 	return copyTree(ctx, src, dst, openRootDir)
 }
@@ -25,9 +22,6 @@ func CopyTree(ctx context.Context, src, dst string) error {
 // copyTree takes the directory opener as a parameter so tests can interpose on
 // a path between its parent being listed and the open.
 func copyTree(ctx context.Context, src, dst string, open func(*os.Root, string) (*os.File, error)) error {
-	if containsPath(src, dst) || containsPath(dst, src) {
-		return fmt.Errorf("copy source and destination overlap: %q and %q", src, dst)
-	}
 	if srcInfo, err := os.Lstat(src); err == nil {
 		if srcInfo.Mode().IsRegular() {
 			return copyFileTree(ctx, src, dst)
@@ -39,6 +33,9 @@ func copyTree(ctx context.Context, src, dst string, open func(*os.Root, string) 
 			}
 			return os.Symlink(link, dst)
 		}
+	}
+	if containsPath(src, dst) || containsPath(dst, src) {
+		return fmt.Errorf("copy source and destination overlap: %q and %q", src, dst)
 	}
 	root, err := os.OpenRoot(src)
 	if err != nil {

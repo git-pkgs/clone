@@ -104,6 +104,23 @@ func TestCopyTreeRecreatesSymlinkSource(t *testing.T) {
 	if err := os.WriteFile(file, []byte("body"), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	checkLink := func(name, src, dst, target string) {
+		t.Helper()
+		if err := CopyTree(context.Background(), src, dst); err != nil {
+			t.Fatalf("CopyTree on a %s symlink source failed: %v", name, err)
+		}
+		info, err := os.Lstat(dst)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&fs.ModeSymlink == 0 {
+			t.Fatalf("dst for a %s symlink source has mode %v, want a recreated symlink", name, info.Mode())
+		}
+		link, err := os.Readlink(dst)
+		if err != nil || link != target {
+			t.Fatalf("dst link = %q, %v; want %q", link, err, target)
+		}
+	}
 	cases := []struct{ name, target string }{
 		{"to-file", file},
 		{"to-dir", base},
@@ -114,20 +131,21 @@ func TestCopyTreeRecreatesSymlinkSource(t *testing.T) {
 		if err := os.Symlink(tc.target, src); err != nil {
 			t.Fatal(err)
 		}
-		dst := filepath.Join(t.TempDir(), "dst")
-		if err := CopyTree(context.Background(), src, dst); err != nil {
-			t.Fatalf("CopyTree on a %s symlink source failed: %v", tc.name, err)
-		}
-		info, err := os.Lstat(dst)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode()&fs.ModeSymlink == 0 {
-			t.Fatalf("dst for a %s symlink source has mode %v, want a recreated symlink", tc.name, info.Mode())
-		}
-		link, err := os.Readlink(dst)
-		if err != nil || link != tc.target {
-			t.Fatalf("dst link = %q, %v; want %q", link, err, tc.target)
-		}
+		checkLink(tc.name, src, filepath.Join(t.TempDir(), "dst"), tc.target)
 	}
+
+	// A link whose target is an ancestor of dst: only the link is recreated and
+	// nothing is walked, so the overlap check must not resolve it and refuse it.
+	tree := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tree, "b"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tree, "c"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(tree, "b", "up")
+	if err := os.Symlink("..", src); err != nil {
+		t.Fatal(err)
+	}
+	checkLink("ancestor-target", src, filepath.Join(tree, "c", "up"), "..")
 }
