@@ -53,7 +53,7 @@ func (c *Cache) Prepare(ctx context.Context, url, ref, dst string) (string, erro
 	if err := os.RemoveAll(dst); err != nil {
 		return "", err
 	}
-	if err := CopyTree(cacheSrc, dst); err != nil {
+	if err := CopyTree(ctx, cacheSrc, dst); err != nil {
 		return "", fmt.Errorf("copy repository cache: %w", err)
 	}
 	return commit, nil
