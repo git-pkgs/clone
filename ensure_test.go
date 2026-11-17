@@ -390,6 +390,9 @@ func TestEnsureWithOptionsRejectsInvalidCredentialURLs(t *testing.T) {
 		if ran {
 			t.Errorf("prefix %q: Git ran before validation", prefix)
 		}
+		if ValidateSubmoduleCredentialURLs([]string{prefix}) == nil {
+			t.Errorf("ValidateSubmoduleCredentialURLs accepted %q", prefix)
+		}
 	}
 }
 

@@ -36,6 +36,14 @@ type credentialPrefix struct {
 	path string
 }
 
+// ValidateSubmoduleCredentialURLs reports the first entry EnsureOptions would
+// reject in SubmoduleCredentialURLs, so callers can check configuration
+// before cloning.
+func ValidateSubmoduleCredentialURLs(urls []string) error {
+	_, err := parseCredentialPrefixes(urls)
+	return err
+}
+
 func parseCredentialPrefixes(raw []string) ([]credentialPrefix, error) {
 	prefixes := make([]credentialPrefix, 0, len(raw))
 	for _, entry := range raw {
