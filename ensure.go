@@ -160,7 +160,9 @@ func updateSubmodulesWithin(ctx context.Context, retry Retry, dst string, update
 			continue
 		}
 		if fetched+len(links) > update.budget.maxModules {
-			update.reportLinks(ctx, policy, current, links, SubmoduleIssueModuleLimit, "")
+			if err := update.reportSkipped(ctx, policy, current, links, SubmoduleIssueModuleLimit); err != nil {
+				return err
+			}
 			return update.reportPending(ctx, policy, queue, SubmoduleIssueModuleLimit)
 		}
 		fetched += len(links)
@@ -185,7 +187,9 @@ func updateSubmodulesWithin(ctx context.Context, retry Retry, dst string, update
 			update.reportLinks(ctx, policy, current, []gitlink{link}, SubmoduleIssueFetchFailed, outputs[link.path])
 		}
 	}
-	return nil
+	// Issue URL lookups swallow their own errors, so a cancellation during
+	// the last report surfaces here.
+	return ctx.Err()
 }
 
 // updateSubmoduleLevel syncs and updates exactly the given submodules of dir,
@@ -219,7 +223,7 @@ func updateSubmoduleLevel(ctx context.Context, policy Retry, dir string, links [
 		}
 		anonymous = nil
 		for _, link := range links {
-			if credentialAllowed(trusted, submoduleURLConfig(ctx, policy, dir, link.name)) {
+			if !link.ambiguous && credentialAllowed(trusted, submoduleURLConfig(ctx, policy, dir, link.name)) {
 				authenticated = append(authenticated, link.path)
 			} else {
 				anonymous = append(anonymous, link.path)
@@ -258,6 +262,9 @@ type gitlink struct {
 	name   string
 	path   string
 	commit string
+	// ambiguous is set when .gitmodules gives path more than one name. Git
+	// registers the last, so name may not be the submodule Git fetches.
+	ambiguous bool
 }
 
 // submoduleGitlinks returns the paths that dir's .gitmodules declares and HEAD
@@ -271,6 +278,7 @@ func submoduleGitlinks(ctx context.Context, policy Retry, dir string) ([]gitlink
 		return nil, ctx.Err()
 	}
 	declared := map[string]string{} // path to submodule name
+	ambiguous := map[string]bool{}
 	var candidates []string
 	for entry := range strings.SplitSeq(strings.TrimSuffix(out, "\x00"), "\x00") {
 		key, value, ok := strings.Cut(entry, "\n")
@@ -278,10 +286,17 @@ func submoduleGitlinks(ctx context.Context, policy Retry, dir string) ([]gitlink
 			continue
 		}
 		submodulePath, ok := SanitizePath(value)
-		if _, seen := declared[submodulePath]; !ok || seen {
+		if !ok {
 			continue
 		}
-		declared[submodulePath] = strings.TrimSuffix(strings.TrimPrefix(key, "submodule."), ".path")
+		name := strings.TrimSuffix(strings.TrimPrefix(key, "submodule."), ".path")
+		if prior, seen := declared[submodulePath]; seen {
+			if prior != name {
+				ambiguous[submodulePath] = true
+			}
+			continue
+		}
+		declared[submodulePath] = name
 		candidates = append(candidates, submodulePath)
 	}
 	if len(candidates) == 0 {
@@ -305,7 +320,7 @@ func submoduleGitlinks(ctx context.Context, policy Retry, dir string) ([]gitlink
 		}
 		fields := strings.Fields(metadata)
 		if len(fields) == 3 && fields[0] == "160000" && fields[1] == "commit" && ValidCommit(fields[2]) {
-			links = append(links, gitlink{name: name, path: treePath, commit: fields[2]})
+			links = append(links, gitlink{name: name, path: treePath, commit: fields[2], ambiguous: ambiguous[treePath]})
 		}
 	}
 	sort.Slice(links, func(i, j int) bool {

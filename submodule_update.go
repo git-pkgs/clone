@@ -46,10 +46,12 @@ func ValidateSubmoduleCredentialURLs(urls []string) error {
 
 func parseCredentialPrefixes(raw []string) ([]credentialPrefix, error) {
 	prefixes := make([]credentialPrefix, 0, len(raw))
-	for _, entry := range raw {
+	for i, entry := range raw {
 		u, ok := strictHTTPSURL(entry)
 		if !ok {
-			return nil, fmt.Errorf("invalid submodule credential URL %q: must be https with no userinfo, query, fragment, or dot segments", RedactURL(entry))
+			// The entry itself is not echoed: it may hold a credential that
+			// RedactURL cannot find in an unparseable URL.
+			return nil, fmt.Errorf("invalid submodule credential URL at index %d: must be https with no userinfo, query, fragment, percent escapes, or dot segments", i)
 		}
 		prefixes = append(prefixes, credentialPrefix{
 			host: strings.ToLower(u.Host),
@@ -62,7 +64,9 @@ func parseCredentialPrefixes(raw []string) ([]credentialPrefix, error) {
 // strictHTTPSURL parses raw and rejects anything Git might resolve to a
 // different repository than the literal path suggests.
 func strictHTTPSURL(raw string) (*url.URL, bool) {
-	if ValidateURL(raw) != nil || strings.ContainsAny(raw, "\\ ") {
+	// url.Parse decodes canonical escapes without recording them, so a %
+	// anywhere could hide a segment the server decodes differently.
+	if ValidateURL(raw) != nil || strings.ContainsAny(raw, "\\ %") {
 		return nil, false
 	}
 	u, err := url.Parse(raw)
@@ -116,6 +120,26 @@ func (u submoduleUpdate) reportLinks(ctx context.Context, policy Retry, p pendin
 	}
 }
 
+// reportSkipped reports links the budget left unfetched, except those a
+// previous update already checked out at their gitlink.
+func (u submoduleUpdate) reportSkipped(ctx context.Context, policy Retry, p pendingSubmodules, links []gitlink, reason SubmoduleIssueReason) error {
+	if u.onIssue == nil {
+		return nil
+	}
+	var missing []gitlink
+	for _, link := range links {
+		ok, err := checkedOutAt(ctx, policy, pathFromGit(p.dir, link.path), link.commit)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			missing = append(missing, link)
+		}
+	}
+	u.reportLinks(ctx, policy, p, missing, reason, "")
+	return ctx.Err()
+}
+
 // reportPending reports the submodules declared by each pending directory as
 // skipped for reason.
 func (u submoduleUpdate) reportPending(ctx context.Context, policy Retry, queue []pendingSubmodules, reason SubmoduleIssueReason) error {
@@ -127,7 +151,9 @@ func (u submoduleUpdate) reportPending(ctx context.Context, policy Retry, queue 
 		if err != nil {
 			return err
 		}
-		u.reportLinks(ctx, policy, p, links, reason, "")
+		if err := u.reportSkipped(ctx, policy, p, links, reason); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -157,7 +183,9 @@ func submoduleIssueURL(ctx context.Context, policy Retry, dir, name string) stri
 	return u.String()
 }
 
-var outputUserinfo = regexp.MustCompile(`://[^/\s@]+@`)
+// Greedy so a password containing @ is consumed through the last @ before
+// the host.
+var outputUserinfo = regexp.MustCompile(`://[^/\s]*@`)
 
 func redactOutput(out string) string {
 	return outputUserinfo.ReplaceAllString(strings.TrimSpace(out), "://REDACTED@")

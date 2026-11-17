@@ -329,7 +329,7 @@ func fakeSubmoduleUpdate(t *testing.T, options EnsureOptions, output string) [][
 func TestEnsureWithOptionsReportsSubmoduleFetchFailure(t *testing.T) {
 	var issues []SubmoduleIssue
 	options := EnsureOptions{OnSubmoduleIssue: func(issue SubmoduleIssue) { issues = append(issues, issue) }}
-	fakeSubmoduleUpdate(t, options, "fatal: could not read from https://user:secret@example.invalid/org/library.git\n")
+	fakeSubmoduleUpdate(t, options, "fatal: could not read from https://user:pa@ss@example.invalid/org/library.git\n")
 
 	want := SubmoduleIssue{
 		Path:   "vendor/library",
@@ -339,6 +339,67 @@ func TestEnsureWithOptionsReportsSubmoduleFetchFailure(t *testing.T) {
 	}
 	if !slices.Equal(issues, []SubmoduleIssue{want}) {
 		t.Errorf("issues = %+v, want %+v", issues, want)
+	}
+}
+
+func TestEnsureWithOptionsReturnsCancellationDuringIssueReport(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "checkout")
+	if err := os.MkdirAll(filepath.Join(dst, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	retry := Retry{
+		Attempts: 1,
+		Run: func(_ context.Context, _ string, _ []string, args ...string) (string, error) {
+			if subcommand(args) == "config" && slices.Contains(args, "--get") {
+				cancel()
+				return "", errGitExit
+			}
+			if out, ok := fakeSubmoduleListing(args); ok {
+				return out, nil
+			}
+			if subcommand(args) == "submodule" && slices.Contains(args, "update") {
+				return "fatal: not found", errGitExit
+			}
+			return "", nil
+		},
+	}
+	options := EnsureOptions{RecurseSubmodules: true, OnSubmoduleIssue: func(SubmoduleIssue) {}}
+	err := EnsureWithOptions(ctx, retry, "https://example.invalid/repo", dst, "", options)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
+// Git registers the last name .gitmodules gives a path, so a check of the
+// first name's URL would not cover the submodule Git fetches.
+func TestEnsureWithOptionsWithholdsCredentialsForAmbiguousSubmodulePath(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "checkout")
+	if err := os.MkdirAll(filepath.Join(dst, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var updates [][]string
+	retry := Retry{
+		Attempts: 1,
+		Run: func(_ context.Context, _ string, _ []string, args ...string) (string, error) {
+			if subcommand(args) == "config" && slices.Contains(args, "--get-regexp") {
+				return "submodule.a.path\nvendor/library\x00submodule.b.path\nvendor/library\x00", nil
+			}
+			if out, ok := fakeSubmoduleListing(args); ok {
+				return out, nil
+			}
+			if subcommand(args) == "submodule" && slices.Contains(args, "update") {
+				updates = append(updates, append([]string(nil), args...))
+			}
+			return "", nil
+		},
+	}
+	options := EnsureOptions{RecurseSubmodules: true, SubmoduleCredentialURLs: []string{"https://example.invalid/org"}}
+	if err := EnsureWithOptions(context.Background(), retry, "https://example.invalid/repo", dst, "", options); err != nil {
+		t.Fatalf("EnsureWithOptions: %v", err)
+	}
+	if len(updates) != 1 || !slices.Contains(updates[0], "credential.helper=") {
+		t.Errorf("updates = %q, want one with the credential helper disabled", updates)
 	}
 }
 
@@ -374,6 +435,9 @@ func TestEnsureWithOptionsRejectsInvalidCredentialURLs(t *testing.T) {
 		"https://example.invalid/org/../other",
 		"https://example.invalid/org//other",
 		"https://example.invalid/%2e%2e/other",
+		"https://example.invalid/org%2Fother",
+		"https://user:secret@example.invalid/%zz",
+		"https://example.invalid/org?token=secret",
 	} {
 		ran := false
 		retry := Retry{Run: func(context.Context, string, []string, ...string) (string, error) {
@@ -404,6 +468,8 @@ func TestCredentialAllowedRejectsAmbiguousSubmoduleURLs(t *testing.T) {
 	for _, raw := range []string{
 		"https://github.com/org/../evil/repo",
 		"https://github.com/org/%2e%2e/evil/repo",
+		"https://github.com/org/%252e%252e/private",
+		"https://github.com/org/repo%3Fother",
 		"https://github.com/org//evil",
 		"https://github.com/org-evil/repo",
 		"https://user@github.com/org/repo",
@@ -792,6 +858,19 @@ func TestUpdateSubmodulesWithinStopsAtModuleLimit(t *testing.T) {
 		assertCheckedOut(t, dst, test.want)
 		if !slices.Equal(issues, test.issues) {
 			t.Errorf("maxModules %d issues = %q, want %q", test.maxModules, issues, test.issues)
+		}
+
+		// Submodules a previous update checked out are not reported when a
+		// later update stops at the budget.
+		if test.maxModules == 3 {
+			issues = nil
+			update.budget.maxModules = 1
+			if err := updateSubmodulesWithin(context.Background(), Retry{}, dst, update); err != nil {
+				t.Fatalf("reused checkout: %v", err)
+			}
+			if len(issues) != 0 {
+				t.Errorf("reused checkout issues = %q, want none", issues)
+			}
 		}
 	}
 }
