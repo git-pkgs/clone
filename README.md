@@ -26,11 +26,21 @@ fmt.Println(clone.Head(ctx, dst))
 
 Pass `true` as the final argument for a full clone, including when an existing shallow checkout needs to be unshallowed. Clone and fetch errors are returned as `*clone.UnreachableError`, except when the context was canceled or reached its deadline. `errors.As` retrieves the URL and underlying Git error. `ValidateURL` accepts `https://` URLs, while `ValidateRef` rejects leading hyphens, `..`, and characters outside letters, digits, `.`, `_`, `/`, and `-`.
 
-Use `EnsureWithOptions` to include submodules. Submodules are initialized and updated recursively with depth 1 after both a new clone and an existing checkout update. This step is best-effort because submodules may be large or refer to unavailable URLs; failures leave the parent checkout usable. Context cancellation is still returned. Recursion is bounded: submodules are fetched one nesting level at a time, at most 8 levels deep and 256 submodules in total. When fetching a repository's submodules would exceed either limit, the submodule step stops before fetching them; submodules already fetched are kept and `Submodules` reports the rest as unavailable. Submodule URLs come from the cloned repository's `.gitmodules`, so submodules are fetched with the ambient credential helper disabled. Other ambient Git credentials are not disabled: an unscoped `http.extraHeader`, `GIT_ASKPASS` or `core.askPass` can still authenticate a repository-chosen submodule URL. Callers that fetch untrusted repositories with `RecurseSubmodules` should scope those credentials to trusted URLs or remove them. Callers that need authenticated submodules can supply credentials through the environment.
+Use `EnsureWithOptions` to include submodules. Submodules are initialized and updated recursively with depth 1 after both a new clone and an existing checkout update. This step is best-effort because submodules may be large or refer to unavailable URLs; failures leave the parent checkout usable. Context cancellation is still returned. Recursion is bounded: submodules are fetched one nesting level at a time, at most 8 levels deep and 256 submodules in total. When fetching a repository's submodules would exceed either limit, the submodule step stops before fetching them; submodules already fetched are kept and `Submodules` reports the rest as unavailable. Submodule URLs come from the cloned repository's `.gitmodules`, so submodules are fetched with the ambient credential helper disabled. Other ambient Git credentials are not disabled: an unscoped `http.extraHeader`, `GIT_ASKPASS` or `core.askPass` can still authenticate a repository-chosen submodule URL. Callers that fetch untrusted repositories with `RecurseSubmodules` should scope those credentials to trusted URLs or remove them.
+
+To fetch private submodules, list trusted URL prefixes in `SubmoduleCredentialURLs`. A submodule whose resolved URL is under one of them is fetched with the ambient credential helper; prefixes match on path segment boundaries, so `https://github.com/my-org` covers `https://github.com/my-org/lib.git` but not `https://github.com/my-org-two/lib.git`. Any repository can name a trusted URL in its `.gitmodules`, so every repository the helper can read under those prefixes may end up in a checkout of an untrusted repository. Prefixes must be `https://` with no userinfo, query, fragment or dot segments; `ValidateSubmoduleCredentialURLs` checks a list up front. The prefix is matched against the URL in `.gitmodules`, before Git applies `url.<base>.insteadOf`, so the caller's own rewrites of a trusted prefix also receive credentials.
+
+Set `OnSubmoduleIssue` to learn which submodules are missing. It is called once per submodule with its path relative to `dst`, its credential-free URL, a reason (`SubmoduleIssueFetchFailed`, `SubmoduleIssueDepthLimit` or `SubmoduleIssueModuleLimit`) and, for a failed fetch, Git's output with URL userinfo redacted. Submodules nested beneath a skipped one are not reported.
 
 ```go
 err := clone.EnsureWithOptions(ctx, clone.Retry{}, url, dst, "main",
-    clone.EnsureOptions{RecurseSubmodules: true},
+    clone.EnsureOptions{
+        RecurseSubmodules:       true,
+        SubmoduleCredentialURLs: []string{"https://github.com/my-org"},
+        OnSubmoduleIssue: func(issue clone.SubmoduleIssue) {
+            log.Printf("submodule %s %s: %s", issue.Path, issue.Reason, issue.Output)
+        },
+    },
 )
 if err != nil {
     log.Fatal(err)
@@ -61,7 +71,7 @@ an invalid tag or another local repository error. `CheckoutTag` does not fetch.
 
 ## Persistent cache
 
-`Cache` stores one checkout per URL under `Root`. `Prepare` holds a per-URL lock while updating the shallow checkout, then replaces `dst` with a copy and returns its commit. The destination must be outside `Root`. Set `RecurseSubmodules` to copy best-effort shallow submodule checkouts into each destination.
+`Cache` stores one checkout per URL under `Root`. `Prepare` holds a per-URL lock while updating the shallow checkout, then replaces `dst` with a copy and returns its commit. The destination must be outside `Root`. Set `RecurseSubmodules` to copy best-effort shallow submodule checkouts into each destination; `SubmoduleCredentialURLs` and `OnSubmoduleIssue` behave as in `EnsureOptions`.
 
 ```go
 cache := clone.Cache{

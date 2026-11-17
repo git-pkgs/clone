@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -30,6 +31,13 @@ func (e *UnreachableError) Unwrap() error {
 type EnsureOptions struct {
 	Full              bool // Clone full history and unshallow an existing checkout.
 	RecurseSubmodules bool // Initialize and update submodules recursively at depth 1.
+	// SubmoduleCredentialURLs lists https URL prefixes, matched on path
+	// segment boundaries, whose submodules are fetched with the ambient
+	// credential helper. All other submodules are fetched without it.
+	SubmoduleCredentialURLs []string
+	// OnSubmoduleIssue, when set, is called for each submodule left out of
+	// the checkout.
+	OnSubmoduleIssue func(SubmoduleIssue)
 }
 
 // Ensure clones url into dst on its first call, then fetches and resets the
@@ -62,11 +70,20 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, options Ensu
 	if err := ValidateRef(ref); err != nil {
 		return err
 	}
+	trusted, err := parseCredentialPrefixes(options.SubmoduleCredentialURLs)
+	if err != nil {
+		return err
+	}
+	update := submoduleUpdate{
+		budget:  submoduleBudget{maxDepth: maxSubmoduleDepth, maxModules: maxSubmodules},
+		trusted: trusted,
+		onIssue: options.OnSubmoduleIssue,
+	}
 	if _, err := os.Stat(filepath.Join(dst, ".git")); err == nil {
 		if err := fetchRef(ctx, retry, url, dst, ref, options.Full); err != nil {
 			return err
 		}
-		return updateSubmodules(ctx, retry, dst, options.RecurseSubmodules)
+		return updateSubmodules(ctx, retry, dst, options.RecurseSubmodules, update)
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), dirPerm); err != nil {
 		return err
@@ -97,7 +114,7 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, options Ensu
 			return err
 		}
 	}
-	return updateSubmodules(ctx, retry, dst, options.RecurseSubmodules)
+	return updateSubmodules(ctx, retry, dst, options.RecurseSubmodules, update)
 }
 
 // Limits on recursive submodule updates, so nested or repeated gitlinks in a
@@ -112,15 +129,12 @@ type submoduleBudget struct {
 	maxModules int
 }
 
-// updateSubmodules fetches dst's submodules within the default limits when enabled.
-func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool) error {
+// updateSubmodules fetches dst's submodules when enabled.
+func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool, update submoduleUpdate) error {
 	if !enabled {
 		return nil
 	}
-	return updateSubmodulesWithin(ctx, retry, dst, submoduleBudget{
-		maxDepth:   maxSubmoduleDepth,
-		maxModules: maxSubmodules,
-	})
+	return updateSubmodulesWithin(ctx, retry, dst, update)
 }
 
 // updateSubmodulesWithin walks submodules breadth first, one repository's
@@ -128,19 +142,15 @@ func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool
 // walk stops before exceeding the budget, keeping what was already fetched.
 // Like git's own --recursive, it descends only into submodules checked out at
 // their gitlink. Only context errors are returned.
-func updateSubmodulesWithin(ctx context.Context, retry Retry, dst string, budget submoduleBudget) error {
-	type pending struct {
-		dir   string
-		depth int // depth of the submodules declared in dir
-	}
+func updateSubmodulesWithin(ctx context.Context, retry Retry, dst string, update submoduleUpdate) error {
 	policy := retry.Resolved()
-	queue := []pending{{dir: dst, depth: 1}}
+	queue := []pendingSubmodules{{dir: dst, depth: 1}}
 	fetched := 0
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
-		if current.depth > budget.maxDepth {
-			return nil
+		if current.depth > update.budget.maxDepth {
+			return update.reportPending(ctx, policy, append([]pendingSubmodules{current}, queue...), SubmoduleIssueDepthLimit)
 		}
 		links, err := submoduleGitlinks(ctx, policy, current.dir)
 		if err != nil {
@@ -149,15 +159,15 @@ func updateSubmodulesWithin(ctx context.Context, retry Retry, dst string, budget
 		if len(links) == 0 {
 			continue
 		}
-		if fetched+len(links) > budget.maxModules {
-			return nil
+		if fetched+len(links) > update.budget.maxModules {
+			if err := update.reportSkipped(ctx, policy, current, links, SubmoduleIssueModuleLimit); err != nil {
+				return err
+			}
+			return update.reportPending(ctx, policy, queue, SubmoduleIssueModuleLimit)
 		}
 		fetched += len(links)
-		paths := make([]string, len(links))
-		for i, link := range links {
-			paths[i] = link.path
-		}
-		if err := updateSubmoduleLevel(ctx, policy, current.dir, paths); err != nil {
+		outputs, err := updateSubmoduleLevel(ctx, policy, current.dir, links, update.trusted)
+		if err != nil {
 			return err
 		}
 		for _, link := range links {
@@ -167,42 +177,94 @@ func updateSubmodulesWithin(ctx context.Context, retry Retry, dst string, budget
 				return err
 			}
 			if ok {
-				queue = append(queue, pending{dir: child, depth: current.depth + 1})
+				queue = append(queue, pendingSubmodules{
+					dir:    child,
+					prefix: joinSlash(current.prefix, link.path),
+					depth:  current.depth + 1,
+				})
+				continue
+			}
+			update.reportLinks(ctx, policy, current, []gitlink{link}, SubmoduleIssueFetchFailed, outputs[link.path])
+		}
+	}
+	// Issue URL lookups swallow their own errors, so a cancellation during
+	// the last report surfaces here.
+	return ctx.Err()
+}
+
+// updateSubmoduleLevel syncs and updates exactly the given submodules of dir,
+// returning the update output for each path. Submodule URLs come from the
+// cloned .gitmodules, so the ambient credential helper is disabled except for
+// URLs under a trusted prefix. Literal pathspecs keep a path from matching
+// more submodules than were counted.
+func updateSubmoduleLevel(ctx context.Context, policy Retry, dir string, links []gitlink, trusted []credentialPrefix) (map[string]string, error) {
+	env := append(remoteEnv(), "GIT_LITERAL_PATHSPECS=1")
+	paths := make([]string, len(links))
+	for i, link := range links {
+		paths[i] = link.path
+	}
+	noHelper := []string{"-c", "credential.helper="}
+	syncArgs := slices.Concat(noHelper, []string{"submodule", "sync", "--"}, paths)
+	if _, err := policy.Run(ctx, dir, env, longPathArgs(syncArgs...)...); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+	}
+
+	anonymous, authenticated := paths, []string(nil)
+	if len(trusted) > 0 {
+		// init resolves relative URLs into .git/config without fetching, so
+		// the URL matched here is the one update will fetch.
+		initArgs := append([]string{"submodule", "init", "--"}, paths...)
+		if _, err := policy.Run(ctx, dir, env, longPathArgs(initArgs...)...); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+		}
+		anonymous = nil
+		for _, link := range links {
+			if !link.ambiguous && credentialAllowed(trusted, submoduleURLConfig(ctx, policy, dir, link.name)) {
+				authenticated = append(authenticated, link.path)
+			} else {
+				anonymous = append(anonymous, link.path)
 			}
 		}
 	}
-	return nil
-}
 
-// updateSubmoduleLevel syncs and updates exactly the given submodules of dir.
-// Submodule URLs come from the cloned .gitmodules, so the ambient credential
-// helper is disabled. Literal pathspecs keep a path from matching more
-// submodules than were counted.
-func updateSubmoduleLevel(ctx context.Context, policy Retry, dir string, paths []string) error {
-	env := append(remoteEnv(), "GIT_LITERAL_PATHSPECS=1")
-	syncArgs := append([]string{"-c", "credential.helper=", "submodule", "sync", "--"}, paths...)
-	if _, err := policy.Run(ctx, dir, env, longPathArgs(syncArgs...)...); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
+	outputs := make(map[string]string, len(paths))
+	for _, batch := range []struct {
+		paths  []string
+		config []string
+	}{{anonymous, noHelper}, {authenticated, nil}} {
+		if len(batch.paths) == 0 {
+			continue
+		}
+		args := slices.Concat(batch.config, []string{"submodule", "update", "--init", "--depth", "1", "--"}, batch.paths)
+		out, err := policy.Do(ctx, Command{
+			Label: "submodule",
+			Dir:   dir,
+			Env:   env,
+			Args:  longPathArgs(args...),
+		})
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+		}
+		for _, p := range batch.paths {
+			outputs[p] = out
 		}
 	}
-	updateArgs := append([]string{"-c", "credential.helper=", "submodule", "update", "--init", "--depth", "1", "--"}, paths...)
-	if _, err := policy.Do(ctx, Command{
-		Label: "submodule",
-		Dir:   dir,
-		Env:   env,
-		Args:  longPathArgs(updateArgs...),
-	}); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-	}
-	return nil
+	return outputs, nil
 }
 
 type gitlink struct {
+	name   string
 	path   string
 	commit string
+	// ambiguous is set when .gitmodules gives path more than one name. Git
+	// registers the last, so name may not be the submodule Git fetches.
+	ambiguous bool
 }
 
 // submoduleGitlinks returns the paths that dir's .gitmodules declares and HEAD
@@ -215,18 +277,26 @@ func submoduleGitlinks(ctx context.Context, policy Retry, dir string) ([]gitlink
 	if err != nil {
 		return nil, ctx.Err()
 	}
-	declared := map[string]bool{}
+	declared := map[string]string{} // path to submodule name
+	ambiguous := map[string]bool{}
 	var candidates []string
 	for entry := range strings.SplitSeq(strings.TrimSuffix(out, "\x00"), "\x00") {
-		_, value, ok := strings.Cut(entry, "\n")
+		key, value, ok := strings.Cut(entry, "\n")
 		if !ok {
 			continue
 		}
 		submodulePath, ok := SanitizePath(value)
-		if !ok || declared[submodulePath] {
+		if !ok {
 			continue
 		}
-		declared[submodulePath] = true
+		name := strings.TrimSuffix(strings.TrimPrefix(key, "submodule."), ".path")
+		if prior, seen := declared[submodulePath]; seen {
+			if prior != name {
+				ambiguous[submodulePath] = true
+			}
+			continue
+		}
+		declared[submodulePath] = name
 		candidates = append(candidates, submodulePath)
 	}
 	if len(candidates) == 0 {
@@ -241,12 +311,16 @@ func submoduleGitlinks(ctx context.Context, policy Retry, dir string) ([]gitlink
 	var links []gitlink
 	for entry := range strings.SplitSeq(strings.TrimSuffix(out, "\x00"), "\x00") {
 		metadata, treePath, ok := strings.Cut(entry, "\t")
-		if !ok || !declared[treePath] {
+		if !ok {
+			continue
+		}
+		name, ok := declared[treePath]
+		if !ok {
 			continue
 		}
 		fields := strings.Fields(metadata)
 		if len(fields) == 3 && fields[0] == "160000" && fields[1] == "commit" && ValidCommit(fields[2]) {
-			links = append(links, gitlink{path: treePath, commit: fields[2]})
+			links = append(links, gitlink{name: name, path: treePath, commit: fields[2], ambiguous: ambiguous[treePath]})
 		}
 	}
 	sort.Slice(links, func(i, j int) bool {
