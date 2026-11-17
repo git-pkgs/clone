@@ -17,7 +17,11 @@ type Cache struct {
 	Root              string // Parent directory for per-URL checkouts.
 	Retry             Retry  // Retry policy for clone and fetch operations.
 	RecurseSubmodules bool   // Best-effort inclusion of nested shallow submodules.
-	mu                sync.Map
+	// SubmoduleCredentialURLs and OnSubmoduleIssue are passed to
+	// EnsureWithOptions; see EnsureOptions.
+	SubmoduleCredentialURLs []string
+	OnSubmoduleIssue        func(SubmoduleIssue)
+	mu                      sync.Map
 }
 
 // Dir returns the persistent directory for url under c.Root.
@@ -45,7 +49,11 @@ func (c *Cache) Prepare(ctx context.Context, url, ref, dst string) (string, erro
 		return "", err
 	}
 	cacheSrc := filepath.Join(cacheDir, "src")
-	options := EnsureOptions{RecurseSubmodules: c.RecurseSubmodules}
+	options := EnsureOptions{
+		RecurseSubmodules:       c.RecurseSubmodules,
+		SubmoduleCredentialURLs: c.SubmoduleCredentialURLs,
+		OnSubmoduleIssue:        c.OnSubmoduleIssue,
+	}
 	if err := EnsureWithOptions(ctx, c.Retry, url, cacheSrc, ref, options); err != nil {
 		return "", err
 	}
