@@ -80,6 +80,11 @@ func ensure(ctx context.Context, retry Retry, url, dst, ref string, options Ensu
 		onIssue: options.OnSubmoduleIssue,
 	}
 	if _, err := os.Stat(filepath.Join(dst, ".git")); err == nil {
+		if options.RecurseSubmodules {
+			if err := clearWorktree(dst); err != nil {
+				return err
+			}
+		}
 		if err := fetchRef(ctx, retry, url, dst, ref, options.Full); err != nil {
 			return err
 		}
@@ -141,9 +146,16 @@ func updateSubmodules(ctx context.Context, retry Retry, dst string, enabled bool
 // submodules per Git call. Each batch is counted before it is fetched, and the
 // walk stops before exceeding the budget, keeping what was already fetched.
 // Like git's own --recursive, it descends only into submodules checked out at
-// their gitlink. Only context errors are returned.
+// their gitlink. A submodule left away from its gitlink is emptied, since a
+// failed update can leave a partial checkout. Only context and removal errors
+// are returned.
 func updateSubmodulesWithin(ctx context.Context, retry Retry, dst string, update submoduleUpdate) error {
 	policy := retry.Resolved()
+	root, err := os.OpenRoot(dst)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
 	queue := []pendingSubmodules{{dir: dst, depth: 1}}
 	fetched := 0
 	for len(queue) > 0 {
@@ -184,6 +196,9 @@ func updateSubmodulesWithin(ctx context.Context, retry Retry, dst string, update
 				})
 				continue
 			}
+			if err := emptySubmodule(root, joinSlash(current.prefix, link.path)); err != nil {
+				return err
+			}
 			update.reportLinks(ctx, policy, current, []gitlink{link}, SubmoduleIssueFetchFailed, outputs[link.path])
 		}
 	}
@@ -209,6 +224,9 @@ func updateSubmoduleLevel(ctx context.Context, policy Retry, dir string, links [
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
+	}
+	if err := syncModuleRemotes(ctx, policy, dir, links); err != nil {
+		return nil, err
 	}
 
 	anonymous, authenticated := paths, []string(nil)

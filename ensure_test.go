@@ -3,11 +3,13 @@ package clone
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -751,7 +753,7 @@ func assertCheckedOut(t *testing.T, dst string, want map[string]bool) {
 			t.Errorf("%s missing: %v", name, err)
 		}
 		if !present && !os.IsNotExist(err) {
-			t.Errorf("%s exists beyond the submodule budget (err %v)", name, err)
+			t.Errorf("%s exists, want absent (err %v)", name, err)
 		}
 	}
 }
@@ -927,4 +929,425 @@ func TestUpdateSubmodulesWithinSkipsCheckoutNotAtGitlink(t *testing.T) {
 	if len(staleCommands) == 0 {
 		t.Error("stale checkout HEAD was never compared with its gitlink")
 	}
+}
+
+// assertEmptyDir checks that dir exists and holds nothing, as Git leaves an
+// uninitialized submodule.
+func assertEmptyDir(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("%s holds %d entries, want none", dir, len(entries))
+	}
+}
+
+func TestCachePrepareClearsSubmoduleThatFailsToUpdate(t *testing.T) {
+	requireGit(t)
+
+	top := newTestRepository(t, "top.txt")
+	library := newTestRepository(t, "library.txt")
+	const (
+		topURL     = "https://clone.test/top.git"
+		libraryURL = "https://clone.test/library.git"
+	)
+	configureTestURLs(t, map[string]string{topURL: top.dir, libraryURL: library.dir})
+	addTestSubmodule(t, top.dir, libraryURL, "lib")
+
+	var issues []string
+	cache := Cache{Root: t.TempDir(), RecurseSubmodules: true, OnSubmoduleIssue: collectIssues(&issues)}
+	dst := filepath.Join(t.TempDir(), "workspace", "src")
+	ctx := context.Background()
+	if _, err := cache.Prepare(ctx, topURL, "", dst); err != nil {
+		t.Fatalf("first Prepare: %v", err)
+	}
+	assertCheckedOut(t, dst, map[string]bool{"lib/library.txt": true})
+
+	missing := "0123456789abcdef0123456789abcdef01234567"
+	runGitTest(t, top.dir, "update-index", "--cacheinfo", "160000,"+missing+",lib")
+	runGitTest(t, top.dir, "commit", "--quiet", "-m", "point lib at a missing commit")
+
+	if _, err := cache.Prepare(ctx, topURL, "", dst); err != nil {
+		t.Fatalf("second Prepare: %v", err)
+	}
+	assertEmptyDir(t, filepath.Join(dst, "lib"))
+	if want := []string{"lib fetch_failed " + libraryURL}; !slices.Equal(issues, want) {
+		t.Errorf("issues = %q, want %q", issues, want)
+	}
+}
+
+func TestEnsureWithOptionsRemovesDeletedSubmoduleCheckouts(t *testing.T) {
+	requireGit(t)
+
+	// top declares gone and sub; sub declares leaf.
+	top := newTestRepository(t, "top.txt")
+	gone := newTestRepository(t, "gone.txt")
+	sub := newTestRepository(t, "sub.txt")
+	leaf := newTestRepository(t, "leaf.txt")
+	const (
+		topURL  = "https://clone.test/top.git"
+		goneURL = "https://clone.test/gone.git"
+		subURL  = "https://clone.test/sub.git"
+		leafURL = "https://clone.test/leaf.git"
+	)
+	configureTestURLs(t, map[string]string{topURL: top.dir, goneURL: gone.dir, subURL: sub.dir, leafURL: leaf.dir})
+	addTestSubmodule(t, sub.dir, leafURL, "leaf")
+	addTestSubmodule(t, top.dir, goneURL, "gone")
+	addTestSubmodule(t, top.dir, subURL, "sub")
+
+	dst := filepath.Join(t.TempDir(), "checkout")
+	ctx := context.Background()
+	options := EnsureOptions{RecurseSubmodules: true}
+	if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", options); err != nil {
+		t.Fatalf("first EnsureWithOptions: %v", err)
+	}
+	assertCheckedOut(t, dst, map[string]bool{"gone/gone.txt": true, "sub/sub.txt": true, "sub/leaf/leaf.txt": true})
+
+	runGitTest(t, sub.dir, "rm", "--quiet", "leaf")
+	runGitTest(t, sub.dir, "commit", "--quiet", "-m", "remove leaf")
+	runGitTest(t, top.dir, "rm", "--quiet", "gone")
+	runGitTest(t, top.dir, "update-index", "--cacheinfo", "160000,"+runGitTest(t, sub.dir, "rev-parse", "HEAD")+",sub")
+	runGitTest(t, top.dir, "commit", "--quiet", "-m", "remove gone, update sub")
+
+	if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", options); err != nil {
+		t.Fatalf("second EnsureWithOptions: %v", err)
+	}
+	assertCheckedOut(t, dst, map[string]bool{"top.txt": true, "gone": false, "sub/sub.txt": true, "sub/leaf": false})
+}
+
+// fetchWithoutSubmodules moves dst to its origin's HEAD the way an update
+// interrupted before the submodule step leaves it.
+func fetchWithoutSubmodules(t *testing.T, dst string) {
+	t.Helper()
+	runGitTest(t, dst, "fetch", "--quiet", "origin", "HEAD")
+	runGitTest(t, dst, "reset", "--quiet", "--hard", "--no-recurse-submodules", "FETCH_HEAD")
+}
+
+func TestEnsureWithOptionsRecoversFromInterruptedUpdate(t *testing.T) {
+	requireGit(t)
+
+	top := newTestRepository(t, "top.txt")
+	gone := newTestRepository(t, "gone.txt")
+	const (
+		topURL  = "https://clone.test/top.git"
+		goneURL = "https://clone.test/gone.git"
+	)
+	configureTestURLs(t, map[string]string{topURL: top.dir, goneURL: gone.dir})
+	addTestSubmodule(t, top.dir, goneURL, "gone")
+
+	dst := filepath.Join(t.TempDir(), "checkout")
+	ctx := context.Background()
+	options := EnsureOptions{RecurseSubmodules: true}
+	if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", options); err != nil {
+		t.Fatalf("first EnsureWithOptions: %v", err)
+	}
+	runGitTest(t, top.dir, "rm", "--quiet", "gone")
+	runGitTest(t, top.dir, "commit", "--quiet", "-m", "remove gone")
+	fetchWithoutSubmodules(t, dst)
+
+	if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", options); err != nil {
+		t.Fatalf("EnsureWithOptions: %v", err)
+	}
+	assertCheckedOut(t, dst, map[string]bool{"gone": false})
+}
+
+// The working tree of a recursive checkout is rebuilt on each update, so
+// files added to it do not survive; a non-recursive update keeps them.
+func TestEnsureWithOptionsRebuildsWorktreeOnlyWhenRecursive(t *testing.T) {
+	topURL, dst := newLibraryCheckout(t)
+	ctx := context.Background()
+	for _, recurse := range []bool{false, true} {
+		if err := os.WriteFile(filepath.Join(dst, "local.txt"), []byte("local\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", EnsureOptions{RecurseSubmodules: recurse}); err != nil {
+			t.Fatalf("recurse %v: EnsureWithOptions: %v", recurse, err)
+		}
+		assertCheckedOut(t, dst, map[string]bool{"local.txt": !recurse, "top.txt": true, "lib/library.txt": true})
+	}
+}
+
+func TestEnsureCleansSubmoduleReplacedByTrackedDirectory(t *testing.T) {
+	requireGit(t)
+
+	top := newTestRepository(t, "top.txt")
+	library := newTestRepository(t, "old.c")
+	const (
+		topURL     = "https://clone.test/top.git"
+		libraryURL = "https://clone.test/library.git"
+	)
+	configureTestURLs(t, map[string]string{topURL: top.dir, libraryURL: library.dir})
+	addTestSubmodule(t, top.dir, libraryURL, "lib")
+
+	dst := filepath.Join(t.TempDir(), "checkout")
+	ctx := context.Background()
+	options := EnsureOptions{RecurseSubmodules: true}
+	if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", options); err != nil {
+		t.Fatalf("first EnsureWithOptions: %v", err)
+	}
+
+	runGitTest(t, top.dir, "rm", "--quiet", "lib")
+	if err := os.MkdirAll(filepath.Join(top.dir, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(top.dir, "lib", "new.c"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, top.dir, "add", "lib/new.c")
+	runGitTest(t, top.dir, "commit", "--quiet", "-m", "vendor lib as files")
+
+	if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", options); err != nil {
+		t.Fatalf("second EnsureWithOptions: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dst, "lib"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if !slices.Equal(names, []string{"new.c"}) {
+		t.Errorf("lib holds %q, want only new.c", names)
+	}
+}
+
+// A path that was a gitlink can sit under a symlink in a later commit. The
+// cleanup must not follow it, here into .git.
+func TestEnsureDoesNotRemoveThroughSymlinkedParent(t *testing.T) {
+	requireGit(t)
+
+	for _, recurse := range []bool{false, true} {
+		top := newTestRepository(t, "top.txt")
+		sub := newTestRepository(t, "sub.txt")
+		const (
+			topURL = "https://clone.test/top.git"
+			subURL = "https://clone.test/sub.git"
+		)
+		configureTestURLs(t, map[string]string{topURL: top.dir, subURL: sub.dir})
+		runGitTest(t, top.dir, "config", "-f", ".gitmodules", "submodule.objects.path", "alias/objects")
+		runGitTest(t, top.dir, "config", "-f", ".gitmodules", "submodule.objects.url", subURL)
+		runGitTest(t, top.dir, "add", ".gitmodules")
+		runGitTest(t, top.dir, "update-index", "--add", "--cacheinfo", "160000,"+sub.commit+",alias/objects")
+		runGitTest(t, top.dir, "commit", "--quiet", "-m", "gitlink under alias")
+
+		dst := filepath.Join(t.TempDir(), "checkout")
+		ctx := context.Background()
+		options := EnsureOptions{RecurseSubmodules: recurse}
+		if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", options); err != nil {
+			t.Fatalf("recurse %v: first EnsureWithOptions: %v", recurse, err)
+		}
+		runGitTest(t, top.dir, "rm", "--quiet", "--cached", "alias/objects")
+		if err := os.Symlink(".git", filepath.Join(top.dir, "alias")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		runGitTest(t, top.dir, "add", "alias")
+		runGitTest(t, top.dir, "commit", "--quiet", "-m", "alias is a symlink")
+
+		_ = EnsureWithOptions(ctx, Retry{}, topURL, dst, "", options)
+		if _, err := os.Stat(filepath.Join(dst, ".git", "objects")); err != nil {
+			t.Errorf("recurse %v: .git/objects after update: %v", recurse, err)
+		}
+	}
+}
+
+// An update canceled after a submodule moved but before its own submodules
+// did leaves a stale nested checkout under one at its gitlink.
+func TestEnsureWithOptionsRecoversInterruptedNestedUpdate(t *testing.T) {
+	requireGit(t)
+
+	top := newTestRepository(t, "top.txt")
+	sub := newTestRepository(t, "sub.txt")
+	leaf := newTestRepository(t, "leaf.txt")
+	const (
+		topURL  = "https://clone.test/top.git"
+		subURL  = "https://clone.test/sub.git"
+		leafURL = "https://clone.test/leaf.git"
+	)
+	configureTestURLs(t, map[string]string{topURL: top.dir, subURL: sub.dir, leafURL: leaf.dir})
+	addTestSubmodule(t, sub.dir, leafURL, "leaf")
+	addTestSubmodule(t, top.dir, subURL, "sub")
+
+	dst := filepath.Join(t.TempDir(), "checkout")
+	ctx := context.Background()
+	if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", EnsureOptions{RecurseSubmodules: true}); err != nil {
+		t.Fatalf("EnsureWithOptions: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(leaf.dir, "leaf.txt"), []byte("leaf2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, leaf.dir, "commit", "--quiet", "-am", "leaf2")
+	runGitTest(t, sub.dir, "update-index", "--cacheinfo", "160000,"+runGitTest(t, leaf.dir, "rev-parse", "HEAD")+",leaf")
+	runGitTest(t, sub.dir, "commit", "--quiet", "-m", "update leaf")
+	runGitTest(t, top.dir, "update-index", "--cacheinfo", "160000,"+runGitTest(t, sub.dir, "rev-parse", "HEAD")+",sub")
+	runGitTest(t, top.dir, "commit", "--quiet", "-m", "update sub")
+	fetchWithoutSubmodules(t, dst)
+	fetchWithoutSubmodules(t, filepath.Join(dst, "sub"))
+
+	if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", EnsureOptions{RecurseSubmodules: true}); err != nil {
+		t.Fatalf("second EnsureWithOptions: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(dst, "sub", "leaf", "leaf.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "leaf2\n" {
+		t.Errorf("nested submodule content = %q, want leaf2", content)
+	}
+}
+
+func TestEnsureClearsMovedSubmodulePath(t *testing.T) {
+	requireGit(t)
+
+	top := newTestRepository(t, "top.txt")
+	library := newTestRepository(t, "library.txt")
+	const (
+		topURL     = "https://clone.test/top.git"
+		libraryURL = "https://clone.test/library.git"
+	)
+	configureTestURLs(t, map[string]string{topURL: top.dir, libraryURL: library.dir})
+	addTestSubmodule(t, top.dir, libraryURL, "old")
+
+	dst := filepath.Join(t.TempDir(), "checkout")
+	ctx := context.Background()
+	options := EnsureOptions{RecurseSubmodules: true}
+	if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", options); err != nil {
+		t.Fatalf("first EnsureWithOptions: %v", err)
+	}
+	runGitTest(t, top.dir, "mv", "old", "new")
+	runGitTest(t, top.dir, "commit", "--quiet", "-m", "move library")
+
+	if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", options); err != nil {
+		t.Fatalf("second EnsureWithOptions: %v", err)
+	}
+	assertCheckedOut(t, dst, map[string]bool{"old": false, "new/library.txt": true})
+}
+
+// newLibraryCheckout returns a checkout of a repository with a submodule at
+// lib, fetched recursively.
+func newLibraryCheckout(t *testing.T) (string, string) {
+	t.Helper()
+	requireGit(t)
+	top := newTestRepository(t, "top.txt")
+	library := newTestRepository(t, "library.txt")
+	const (
+		topURL     = "https://clone.test/top.git"
+		libraryURL = "https://clone.test/library.git"
+	)
+	configureTestURLs(t, map[string]string{topURL: top.dir, libraryURL: library.dir})
+	addTestSubmodule(t, top.dir, libraryURL, "lib")
+	dst := filepath.Join(t.TempDir(), "checkout")
+	if err := EnsureWithOptions(context.Background(), Retry{}, topURL, dst, "", EnsureOptions{RecurseSubmodules: true}); err != nil {
+		t.Fatalf("EnsureWithOptions: %v", err)
+	}
+	return topURL, dst
+}
+
+// A submodule URL can name an empty repository, which leaves a checkout with
+// an unborn HEAD. That is a missing submodule, not a reason to fail.
+func TestEnsureTreatsEmptySubmoduleRepositoryAsMissing(t *testing.T) {
+	requireGit(t)
+
+	top := newTestRepository(t, "top.txt")
+	empty := t.TempDir()
+	runGitTest(t, empty, "init", "--quiet", "-b", "main")
+	const (
+		topURL   = "https://clone.test/top.git"
+		emptyURL = "https://clone.test/empty.git"
+	)
+	configureTestURLs(t, map[string]string{topURL: top.dir, emptyURL: empty})
+	runGitTest(t, top.dir, "config", "-f", ".gitmodules", "submodule.lib.path", "lib")
+	runGitTest(t, top.dir, "config", "-f", ".gitmodules", "submodule.lib.url", emptyURL)
+	runGitTest(t, top.dir, "add", ".gitmodules")
+	runGitTest(t, top.dir, "update-index", "--add", "--cacheinfo", "160000,"+top.commit+",lib")
+	runGitTest(t, top.dir, "commit", "--quiet", "-m", "submodule from an empty repository")
+
+	var issues []string
+	options := EnsureOptions{RecurseSubmodules: true, OnSubmoduleIssue: collectIssues(&issues)}
+	dst := filepath.Join(t.TempDir(), "checkout")
+	for range 2 {
+		issues = nil
+		if err := EnsureWithOptions(context.Background(), Retry{}, topURL, dst, "", options); err != nil {
+			t.Fatalf("EnsureWithOptions: %v", err)
+		}
+		assertEmptyDir(t, filepath.Join(dst, "lib"))
+		if want := []string{"lib fetch_failed " + emptyURL}; !slices.Equal(issues, want) {
+			t.Errorf("issues = %q, want %q", issues, want)
+		}
+	}
+}
+
+func TestEnsureWithOptionsRecoversFromBrokenSubmoduleGitfile(t *testing.T) {
+	for _, target := range []string{"missing", "no-head"} {
+		topURL, dst := newLibraryCheckout(t)
+		lib := filepath.Join(dst, "lib")
+		gitDir := filepath.Join(dst, ".git", "broken-"+target)
+		if target == "no-head" {
+			if err := os.MkdirAll(gitDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(lib, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := EnsureWithOptions(context.Background(), Retry{}, topURL, dst, "", EnsureOptions{RecurseSubmodules: true}); err != nil {
+			t.Fatalf("%s: EnsureWithOptions: %v", target, err)
+		}
+		assertCheckedOut(t, dst, map[string]bool{"lib/library.txt": true})
+	}
+}
+
+// addTestGitConfig appends key=value to the GIT_CONFIG_* entries a test set.
+func addTestGitConfig(t *testing.T, key, value string) {
+	t.Helper()
+	count, err := strconv.Atoi(os.Getenv("GIT_CONFIG_COUNT"))
+	if err != nil {
+		count = 0
+	}
+	t.Setenv(fmt.Sprintf("GIT_CONFIG_KEY_%d", count), key)
+	t.Setenv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", count), value)
+	t.Setenv("GIT_CONFIG_COUNT", fmt.Sprint(count+1))
+}
+
+// With extensions.submodulePathConfig, a submodule named with a slash keeps
+// its repository at an encoded location. The reused repository must still be
+// pointed at the new URL, or update fetches from the old one.
+func TestEnsureWithOptionsSyncsURLWithSubmodulePathConfig(t *testing.T) {
+	requireGit(t)
+
+	first := newTestRepository(t, "first.txt")
+	second := newTestRepository(t, "second.txt")
+	top := newTestRepository(t, "top.txt")
+	const (
+		topURL    = "https://clone.test/top.git"
+		firstURL  = "https://clone.test/first.git"
+		secondURL = "https://clone.test/second.git"
+	)
+	configureTestURLs(t, map[string]string{topURL: top.dir, firstURL: first.dir, secondURL: second.dir})
+	addTestGitConfig(t, "init.defaultSubmodulePathConfig", "true")
+	runGitTest(t, top.dir, "submodule", "add", "--quiet", "--name", "vendor/dependency", firstURL, "deps/library")
+	runGitTest(t, top.dir, "commit", "--quiet", "-am", "add submodule")
+
+	dst := filepath.Join(t.TempDir(), "checkout")
+	ctx := context.Background()
+	options := EnsureOptions{RecurseSubmodules: true}
+	if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", options); err != nil {
+		t.Fatalf("first EnsureWithOptions: %v", err)
+	}
+	if got := runGitTest(t, dst, "config", "--get", "extensions.submodulePathConfig"); got != "true" {
+		t.Skipf("Git does not support extensions.submodulePathConfig (got %q)", got)
+	}
+
+	runGitTest(t, top.dir, "config", "--file", ".gitmodules", "submodule.vendor/dependency.url", secondURL)
+	runGitTest(t, top.dir, "add", ".gitmodules")
+	runGitTest(t, top.dir, "update-index", "--cacheinfo", "160000,"+second.commit+",deps/library")
+	runGitTest(t, top.dir, "commit", "--quiet", "-m", "retarget submodule")
+
+	if err := EnsureWithOptions(ctx, Retry{}, topURL, dst, "", options); err != nil {
+		t.Fatalf("second EnsureWithOptions: %v", err)
+	}
+	assertCheckedOut(t, dst, map[string]bool{"deps/library/second.txt": true})
 }
